@@ -389,4 +389,146 @@ public class ArticleGenerator : MonoBehaviour
         }
         return sb.ToString().Trim();
     }
+
+    // ==========================================
+    // 拖拽生成核心黑科技：空间坐标 -> 字符串索引
+    // ==========================================
+    public void HandleNodeDropped(Vector2 screenPos, Camera cam, BaseNodeController node)
+    {
+        if (mainBodyInput == null || node == null || node.Data == null) return;
+
+        // 1. 提取 TextMeshPro 核心文本组件
+        TMP_Text textComp = mainBodyInput.textComponent;
+
+        // 2. 【核心黑科技】：根据屏幕鼠标坐标，反推最近的字符索引
+        int insertIndex = TMP_TextUtilities.GetCursorIndexFromPosition(textComp, screenPos, cam);
+
+        // 如果用户拖到了输入框的空白处（文本末尾之后），API 会返回 -1，此时我们追加到末尾
+        if (insertIndex == -1 || insertIndex > mainBodyInput.text.Length)
+        {
+            insertIndex = mainBodyInput.text.Length;
+        }
+
+        string nodeTitle = node.Data.Title;
+        string nodeContent = node.Data.Content;
+
+        // 3. 启动异步生成协程
+        StartCoroutine(GenerateParagraphFromDrop(insertIndex, nodeTitle, nodeContent, node.NodeID));
+    }
+
+    private IEnumerator GenerateParagraphFromDrop(int insertIndex, string title, string content, string nodeID)
+    {
+        // 1. 制作高亮的占位符
+        string placeholderText = $"\n[ AI 正在将节点【{title}】展开为正文... ]\n";
+
+        // 2. 硬生生切开原文，插入占位符
+        string originalText = mainBodyInput.text;
+        mainBodyInput.text = originalText.Insert(insertIndex, placeholderText);
+
+        // 3. 组装 Prompt 给 LLM
+        string prompt = $@"你是一个学术写作助手。用户将思维导图的一个节点拖入了文章中。
+请根据以下节点的标题和内容，扩写成一段自然流畅的正文段落，用于无缝插入到文章中。
+【节点标题】：{title}
+【节点内容】：{content}
+【规则】：直接输出扩写后的段落，不要废话，不要输出标签，不要带有“输出如下”。";
+
+        bool finished = false;
+        string aiResult = "";
+
+        // 4. 发起请求
+        if (LLMManager.Instance != null)
+        {
+            LLMManager.Instance.TaskChat(prompt, (response, success) =>
+            {
+                if (success)
+                {
+                    aiResult = FormatChineseArticle(response);
+                }
+                else
+                {
+                    aiResult = $"\n[ 节点展开失败: {response} ]\n";
+                }
+                finished = true;
+            });
+        }
+        else
+        {
+            aiResult = "LLM 管理器未初始化";
+            finished = true;
+        }
+
+        while (!finished) yield return null;
+
+        // 5. 替换占位符为生成的真实段落
+        // 注意：因为我们用了确切的占位符字符串，直接用 Replace 替换即可，极度安全
+        mainBodyInput.text = mainBodyInput.text.Replace(placeholderText, "\n" + aiResult + "\n");
+
+        // 6. 埋点记录
+        if (UserBehaviorSystem.Instance != null)
+        {
+            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Node, "Article", $"DragDropNode_{nodeID}", 1);
+        }
+    }
+
+    // ==========================================
+    // 拖拽悬停视觉反馈：金色幽灵光标
+    // ==========================================
+    private RectTransform _dropCaret;
+
+    public void UpdateDragDropFeedback(Vector2 screenPos, Camera cam)
+    {
+        if (mainBodyInput == null || !articleModal.activeSelf) return;
+
+        // 1. 动态创建一个金色的光标线 (无需配置 Prefab)
+        if (_dropCaret == null)
+        {
+            GameObject caretObj = new GameObject("DropCaret_AUBIM");
+            // 将光标挂载到 Text 内部，坐标系完美对齐
+            caretObj.transform.SetParent(mainBodyInput.textComponent.transform, false);
+            Image img = caretObj.AddComponent<Image>();
+            img.color = new Color(0f, 0f, 0f, 1f); // 醒目的黑色
+
+            _dropCaret = caretObj.GetComponent<RectTransform>();
+            _dropCaret.pivot = new Vector2(0, 0); // 左下角对齐
+            // 宽度 3 像素，高度跟随当前字体大小
+            _dropCaret.sizeDelta = new Vector2(3f, mainBodyInput.textComponent.fontSize * 1.2f);
+        }
+
+        _dropCaret.gameObject.SetActive(true);
+
+        // 2. 计算当前鼠标正下方的字符索引
+        TMP_Text textComp = mainBodyInput.textComponent;
+        int insertIndex = TMP_TextUtilities.GetCursorIndexFromPosition(textComp, screenPos, cam);
+
+        if (insertIndex == -1 || textComp.textInfo.characterCount == 0)
+        {
+            _dropCaret.localPosition = Vector3.zero;
+            return;
+        }
+
+        insertIndex = Mathf.Clamp(insertIndex, 0, textComp.textInfo.characterCount);
+
+        // 3. 将光标吸附到对应字符的物理坐标上
+        Vector3 caretPos = Vector3.zero;
+        if (insertIndex < textComp.textInfo.characterCount)
+        {
+            // 停在某个字符前
+            caretPos = textComp.textInfo.characterInfo[insertIndex].bottomLeft;
+        }
+        else
+        {
+            // 停在整段话的最后面
+            caretPos = textComp.textInfo.characterInfo[textComp.textInfo.characterCount - 1].bottomRight;
+        }
+
+        _dropCaret.localPosition = caretPos;
+    }
+
+    public void ClearDragDropFeedback()
+    {
+        if (_dropCaret != null)
+        {
+            _dropCaret.gameObject.SetActive(false);
+        }
+    }
 }

@@ -109,6 +109,26 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
                 }
             }
 
+            // =========================================================
+            // 【新增】：检测是否悬停在成文区，呼出金色幽灵光标
+            // =========================================================
+            bool hoveringOnArticle = false;
+            if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy)
+            {
+                RectTransform articleRect = ArticleGenerator.Instance.mainBodyInput.GetComponent<RectTransform>();
+                if (RectTransformUtility.RectangleContainsScreenPoint(articleRect, eventData.position, eventData.pressEventCamera))
+                {
+                    hoveringOnArticle = true;
+                    ArticleGenerator.Instance.UpdateDragDropFeedback(eventData.position, eventData.pressEventCamera);
+                }
+            }
+
+            // 如果移出了成文区，立刻隐藏光标
+            if (!hoveringOnArticle && ArticleGenerator.Instance != null)
+            {
+                ArticleGenerator.Instance.ClearDragDropFeedback();
+            }
+
             bool isMultiSelect = _activeProxies.Count > 1;
 
             if (_detector != null)
@@ -230,6 +250,21 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
     {
         ClearAllFeedback();
 
+        // =========================================================
+        // 【新增 1】：检测是否拖拽到了成文区的正文输入框中
+        // =========================================================
+        bool droppedOnArticle = false;
+        if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy)
+        {
+            RectTransform articleRect = ArticleGenerator.Instance.mainBodyInput.GetComponent<RectTransform>();
+            // 使用屏幕坐标和相机进行碰撞检测
+            if (RectTransformUtility.RectangleContainsScreenPoint(articleRect, eventData.position, eventData.pressEventCamera))
+            {
+                droppedOnArticle = true;
+                _forceSnapBack = true; // 【关键】：把节点原路弹回画布，因为这相当于“提取素材”，而不是“搬家”
+            }
+        }
+
         // 缓存 Leader 最终位置
         Vector3 leaderFinalWorldPos = _originalPosition;
         var leaderData = _activeProxies.Find(x => x.sourceNode == _myController);
@@ -245,6 +280,52 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
             if (data.sourceNode != null) data.sourceNode.SetGhostMode(false);
         }
         _activeProxies.Clear();
+
+        // 【新增 2】：如果是投入成文区，触发生成逻辑并立刻结束
+        if (droppedOnArticle)
+        {
+            // A. 清理拖拽悬停光标
+            ArticleGenerator.Instance.ClearDragDropFeedback();
+
+            // B. 将屏幕坐标和节点数据发送给成文区
+            ArticleGenerator.Instance.HandleNodeDropped(eventData.position, eventData.pressEventCamera, _myController);
+
+            // C. 恢复被暂时斩断的连线
+            if (NodeLinkManager.Instance != null)
+            {
+                foreach (var pair in _detachedStates)
+                {
+                    if (pair.Key != null && pair.Value.originalParent != null)
+                    {
+                        NodeLinkManager.Instance.CreateConnection(pair.Value.originalParent, pair.Key);
+                        pair.Key.transform.SetSiblingIndex(pair.Value.originalSiblingIndex);
+                    }
+                }
+            }
+            _detachedStates.Clear();
+
+            // =======================================================
+            // 【核心修复】：必须同时恢复坐标和层级索引（SiblingIndex）
+            // 否则同级节点会被 Unity 渲染机制默认扔到父物体的最后面！
+            // =======================================================
+            _targetRect.anchoredPosition = _originalPosition;
+            targetRoot.SetSiblingIndex(_originalSiblingIndex);
+
+            // 触发自动布局刷新，确保父物体排版不乱
+            if (_myController.parentNode != null && AutoLayoutSystem.Instance != null)
+            {
+                AutoLayoutSystem.Instance.RefreshLayout(_myController.parentNode);
+            }
+            else if (AutoLayoutSystem.Instance != null)
+            {
+                AutoLayoutSystem.Instance.RefreshLayout(_myController);
+            }
+
+            return; // 提前退出，禁止触发画布移动！
+        }
+
+        // 兜底：即使不是投进文章区，拖拽结束也隐藏幽灵光标
+        if (ArticleGenerator.Instance != null) ArticleGenerator.Instance.ClearDragDropFeedback();
 
         // 2. 结算交互结果
         if (_forceSnapBack)
@@ -438,7 +519,7 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
 
             CanvasGroup cg = proxyObj.GetComponent<CanvasGroup>();
             if (cg == null) cg = proxyObj.AddComponent<CanvasGroup>();
-            cg.alpha = 0.8f;
+            cg.alpha = 0.2f;
             cg.blocksRaycasts = false;
             cg.interactable = false;
             foreach (var g in proxyObj.GetComponentsInChildren<Graphic>()) g.raycastTarget = false;
