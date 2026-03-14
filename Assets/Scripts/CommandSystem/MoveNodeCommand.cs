@@ -8,6 +8,7 @@ public class MoveNodeCommand : ICommand
     private string _nodeID;
 
     private bool _isDetachMove;
+    private BaseNodeController _node;
 
     // 构造函数：在操作发生时，把“案发现场”的数据存下来
     public MoveNodeCommand(BaseNodeController node, Vector2 oldPos, Vector2 newPos, bool isDetachMove)
@@ -21,6 +22,9 @@ public class MoveNodeCommand : ICommand
 
     public void Execute()
     {
+        // 【新增】：只要用户拖拽移动了节点，立即实体化
+        if (_node != null) _node.SolidifyCognitiveNode();
+
         // 重做 (Redo) 时：去新位置
         if (_targetRect != null)
         {

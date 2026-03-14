@@ -535,6 +535,9 @@ public class NodeCardManager : MonoBehaviour
             node.SetSelected(true);
         }
 
+        // 只要用户切换了焦点（证明用户在主动推进任务），立刻打断可能正在发呆闪烁的 AI 按钮
+        InterventionTracker.Instance.AbortLocalBreathing();
+
         // [埋点] 切换焦点
         if (node != null && UserBehaviorSystem.Instance != null)
         {

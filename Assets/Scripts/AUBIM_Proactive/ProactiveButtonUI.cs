@@ -162,4 +162,15 @@ public class ProactiveButtonUI : MonoBehaviour, IPointerEnterHandler, IPointerEx
             ProactiveInterventionSystem.Instance.TriggerInterventionByType(interventionType);
         }
     }
+
+    // 【新增】：提供给外部强行掐断呼吸的接口
+    public void StopBreathingEarly()
+    {
+        if (isBreathing)
+        {
+            isBreathing = false;
+            if (_breathCoroutine != null) StopCoroutine(_breathCoroutine);
+            SetGhostMode(); // 恢复半透明不可点状态
+        }
+    }
 }

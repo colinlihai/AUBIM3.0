@@ -18,6 +18,7 @@ public class EditContentCommand : ICommand
 
     public void Execute()
     {
+        if (_node != null) _node.SolidifyCognitiveNode();
         ApplyText(_newText);
 
         TriggerAIChecks();

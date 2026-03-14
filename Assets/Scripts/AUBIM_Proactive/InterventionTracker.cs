@@ -323,6 +323,25 @@ public class InterventionTracker : MonoBehaviour
                     ConcludeObservation(0.5f, "Implicit_Inspiration_Global"); return; // 画布区的隐性采纳也改为 0.5f
                 }
 
+                // =========================================================
+                // 【核心修正】：基于留存时间（Dwell Time）的删除意图分类
+                // =========================================================
+                if (eType == "Object_Delete" && log.TargetID == _trackedTargetID)
+                {
+                    if (_observationTimer < 12.0f)
+                    {
+                        // 存活不到 12 秒：秒删，视为干扰和拒绝
+                        Debug.Log($"<color=red>[ML Tracker]</color> AI 节点存活仅 {_observationTimer:F1}s 被秒删，判定为拒绝 (Score: -1.0)。");
+                        ConcludeObservation(-1.0f, "Deleted_Instantly_Rejected");
+                    }
+                    else
+                    {
+                        // 存活超过 12 秒：已提供认知价值，阅后即焚，视为吸收
+                        Debug.Log($"<color=cyan>[ML Tracker]</color> AI 节点存活 {_observationTimer:F1}s 后被删，判定为灵感吸收 (Score: +0.5)。");
+                        ConcludeObservation(0.5f, "Absorbed_And_Deleted");
+                    }
+                }
+
                 if (eType == "Object_Delete" && log.TargetID == _trackedTargetID) ConcludeObservation(-1.0f, "Deleted_Node");
                 else if (eType == "Canvas_LinkNodes" && log.ContextInfo.Contains(_trackedTargetID)) ConcludeObservation(1.0f, "Linked_Node");
                 else if ((eType == "Edit_Node_Body_End" || eType == "Edit_Node_Title_End") && log.TargetID == _trackedTargetID) ConcludeObservation(1.5f, "Edited_Node"); // 修改节点 = 共创 1.5f
@@ -390,6 +409,33 @@ public class InterventionTracker : MonoBehaviour
         catch (Exception e)
         {
             Debug.LogError("[ML Tracker] 保存训练数据失败：" + e.Message);
+        }
+    }
+
+    // 【新增】：当用户进行了主动操作（如切换节点）时，强行中断局部 AI 的呼唤
+    public void AbortLocalBreathing()
+    {
+        if (!_isBreathingActive) return;
+
+        bool actuallyAborted = false;
+        if (proactiveButtons != null)
+        {
+            foreach (var btn in proactiveButtons)
+            {
+                if (btn.isBreathing)
+                {
+                    btn.StopBreathingEarly();
+                    actuallyAborted = true;
+                }
+            }
+        }
+
+        if (actuallyAborted)
+        {
+            _isBreathingActive = false;
+            _idleTimer = 0f;
+            // 记录为：AI 正在提示时，被用户用其他动作（比如新建节点）打断/无视了
+            OnInterventionIgnored(_lastPredictedType);
         }
     }
 }

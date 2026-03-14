@@ -83,4 +83,30 @@ public static class AIPromptLibrary
         "1. 必须严格遵守开头的前缀要求。\n" +
         "2. 绝对不要带引号，不要有任何寒暄或废话，只输出一行短句。\n" +
         "3. 你的建议必须简短（30-50字以内）。";
+
+    // ==========================================
+    // 导图区：局部聚焦 + 全局背景 的高级 Prompt
+    // ==========================================
+    public static string GetCanvasLocalContextualPrompt(InterventionType type, string targetTitle, string targetContent, string globalContext)
+    {
+        string instruction = "";
+        if (type == InterventionType.Socratic)
+            instruction = "请向该【核心节点】提出一个苏格拉底式的深度追问，引导用户向下挖掘更深层的原因或机制。";
+        else if (type == InterventionType.Counter)
+            instruction = "请提出一个反向视角或潜在漏洞，挑战该【核心节点】当前的逻辑前提。";
+        else if (type == InterventionType.Elaborate)
+            instruction = "请基于全局背景，为该【核心节点】补充一个具体的解释、跨界案例或延伸细节。";
+
+        return $@"你是一个高级认知引导导师。
+【全局导图背景】(仅作为你理解逻辑上下文的参考，绝不要重复输出)：
+{globalContext}
+
+【用户当前聚焦的核心节点】：
+标题：{targetTitle}
+内容：{targetContent}
+
+【你的任务】：
+请结合全局背景，严格执行以下指令：{instruction}
+【规则】：只输出你的建议、补充或反问，字数控制在40字以内，语气要具有启发性，绝不要带任何前缀标签（如“建议：”或“反问：”）。";
+    }
 }

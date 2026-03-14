@@ -17,6 +17,7 @@ public class EditTitleCommand : ICommand
 
     public void Execute()
     {
+        if (_node != null) _node.SolidifyCognitiveNode();
         ApplyTitle(_newTitle);
 
         // [埋点] 标题编辑完成

@@ -256,6 +256,32 @@ public class CoreBodyVisual : MonoBehaviour, IPointerClickHandler, IPointerEnter
                 targetOutline.effectColor = outlineColor;
             }
         }
+
+        // =========================================================
+        // 【新增】：AI 生成认知卡片的视觉弱化 (半透明草稿态)
+        // =========================================================
+        var baseController = GetComponentInParent<BaseNodeController>();
+        if (baseController != null && _mainCanvasGroup != null)
+        {
+            // 如果是幽灵模式，保持原来的高度透明
+            if (_mainCanvasGroup.alpha == 0.3f)
+            {
+                // do nothing, let SetGhostMode control it
+            }
+            // 如果是 AI 认知节点，并且还没有被用户“实体化”（即 isCognitiveNode 还是 true）
+            else if (baseController.isCognitiveNode)
+            {
+                // 给予一个半透明的玻璃态视觉暗示（比如 0.65 不透明度）
+                _mainCanvasGroup.alpha = 0.4f;
+
+                // 可选：你甚至可以在这里把边框改成虚线，或者把文字颜色调浅
+            }
+            else
+            {
+                // 普通节点，完全不透明
+                _mainCanvasGroup.alpha = 1.0f;
+            }
+        }
     }
 
     // --- 编辑模式逻辑 ---

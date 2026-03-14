@@ -26,6 +26,9 @@ public class ConnectionCommand : ICommand
 
     public void Execute()
     {
+        // 【新增】：无论连线还是断开，参与操作的节点全部实体化！
+        if (_parent != null) _parent.SolidifyCognitiveNode();
+        if (_child != null) _child.SolidifyCognitiveNode();
         if (_isLinkOperation)
         {
             // 执行连线

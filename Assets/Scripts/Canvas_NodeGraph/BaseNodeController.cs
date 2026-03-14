@@ -295,4 +295,26 @@ public class BaseNodeController : MonoBehaviour, IPointerClickHandler
             }
         }
     }
+
+    // ==========================================
+    // 【新增】：将 AI 草稿节点实体化为正式节点
+    // ==========================================
+    public void SolidifyCognitiveNode()
+    {
+        if (isCognitiveNode)
+        {
+            isCognitiveNode = false; // 摘掉 AI 标签
+            cognitiveType = "";      // 清空类型
+
+            // 触发视觉刷新，使其恢复 1.0 的完全不透明状态
+            if (visual != null)
+            {
+                // 利用现有的交互状态触发一次刷新
+                visual.SetSelected(false);
+                visual.SetSelected(true);
+            }
+
+            Debug.Log($"<color=green>[Node]</color> 节点 {NodeID} 被用户操作实体化！");
+        }
+    }
 }

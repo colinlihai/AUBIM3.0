@@ -320,7 +320,7 @@ public class ArticleGenerator : MonoBehaviour
         if (string.IsNullOrWhiteSpace(rawData)) return;
         string newText = mainBodyInput.text;
         if (!string.IsNullOrWhiteSpace(newText) && !newText.EndsWith("\n")) newText += "\n\n";
-        mainBodyInput.text = newText + rawData;
+        mainBodyInput.text = (newText + rawData).Replace("\r", "");
     }
 
     public void ExportToTxt() { /* Ô­ÓÐÂß¼­±£Áô */ }

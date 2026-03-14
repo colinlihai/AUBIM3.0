@@ -69,7 +69,7 @@ public class ProactiveInterventionSystem : MonoBehaviour
     }
 
     // ==========================================
-    // 逻辑 1：导图区生成子节点 (局部)
+    // 逻辑 1：导图区生成子节点 (局部聚焦 + 全局视野)
     // ==========================================
     private void GenerateLocalNodeIntervention(BaseNodeController targetNode, InterventionType type)
     {
@@ -77,10 +77,45 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
         string cardContent = targetNode.Data.Content ?? "";
 
-        // 【优化】：从文库一键获取标题和 Prompt
+        // ==========================================
+        // 【核心升级】：收集全局上下文 (Global Context)
+        // ==========================================
+        System.Text.StringBuilder bgBuilder = new System.Text.StringBuilder();
+        if (NodeCardManager.Instance != null)
+        {
+            var allNodes = NodeCardManager.Instance.GetAllNodes();
+            foreach (var node in allNodes)
+            {
+                // 排除当前选中的节点，排除隐藏的无效节点
+                if (node != targetNode && node.gameObject.activeInHierarchy && node.Data != null)
+                {
+                    string safeTitle = string.IsNullOrEmpty(node.Data.Title) ? "无标题" : node.Data.Title;
+                    string content = node.Data.Content ?? "";
+                    // 限制长度，提取前 100 字作为摘要，防止 Token 爆炸
+                    string safeContent = content.Length > 100 ? content.Substring(0, 100) + "..." : content;
+                    bgBuilder.AppendLine($"- {safeTitle}：{safeContent}");
+                }
+            }
+        }
+
+        string globalContext = bgBuilder.ToString();
+        if (string.IsNullOrWhiteSpace(globalContext))
+        {
+            globalContext = "（当前无其他背景节点，这是用户的思考起点）";
+        }
+
+        // 【保持】：从文库一键获取标题和基础指令
         var promptData = AIPromptLibrary.GetNodeInterventionPrompt(type, isGlobal: false);
 
-        string prompt = $"{promptData.RolePrompt}\n当前关注的卡片：【{targetNode.Data.Title} - {cardContent}】\n直接输出生成的内容，不要带任何废话或引号。";
+        string prompt = $@"{promptData.RolePrompt}
+【全局导图背景】(仅作为你理解逻辑上下文的参考，绝不要重复输出)：
+{globalContext}
+
+【用户当前关注的核心卡片】：
+标题：{targetNode.Data.Title}
+内容：{cardContent}
+
+【你的任务】：结合全局背景，针对用户当前关注的核心卡片执行你的引导任务。请直接输出生成的内容，不要带任何废话、前缀标签或引号。";
 
         LLMManager.Instance.TaskChat(prompt, (response, success) =>
         {
@@ -90,7 +125,7 @@ public class ProactiveInterventionSystem : MonoBehaviour
                 var newNode = NodeCardManager.Instance.CreateNodeAt(spawnPos);
                 if (newNode is NodeController nc)
                 {
-                    nc.Data.Title = promptData.Title; // 使用文库给的标题
+                    nc.Data.Title = promptData.Title;
                     nc.Data.Content = response.Replace("\r", "");
                     nc.RefreshUI();
 
@@ -99,9 +134,14 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
                     if (NodeLinkManager.Instance != null) NodeLinkManager.Instance.CreateConnection(targetNode, newNode);
                     NodeCardManager.Instance.SelectNode(newNode, false);
+
+                    // =========================================================
+                    // 【核心修复】：将 targetID 指向 newNode.NodeID
+                    // 这样 ML Tracker 才知道要去监视这个新诞生的 AI 节点的命运
+                    // =========================================================
+                    if (UserBehaviorSystem.Instance != null)
+                        UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: type.ToString());
                 }
-                if (UserBehaviorSystem.Instance != null)
-                    UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: targetNode.NodeID, info: type.ToString());
             }
         }, false);
     }
@@ -122,7 +162,6 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
         if (fullContext.Length > 1500) fullContext = fullContext.Substring(0, 1500);
 
-        // 【优化】：从文库获取全局 Prompt
         var promptData = AIPromptLibrary.GetNodeInterventionPrompt(type, isGlobal: true);
 
         string prompt = $"{promptData.RolePrompt}\n当前全图拓扑大纲：\n{fullContext}\n直接输出生成的内容，不要带任何废话或引号。";
@@ -133,51 +172,40 @@ public class ProactiveInterventionSystem : MonoBehaviour
         {
             if (success && !string.IsNullOrWhiteSpace(response))
             {
-                // ==========================================
-                // 【视觉升级 1：计算当前屏幕的正中心坐标】
-                // ==========================================
                 Vector2 spawnPos = Vector2.zero;
-
-                // 获取装载所有节点的容器 RectTransform
                 RectTransform containerRect = NodeCardManager.Instance.cardContainer.GetComponent<RectTransform>();
-
-                // 适配不同的 Canvas 渲染模式
                 Canvas parentCanvas = containerRect.GetComponentInParent<Canvas>();
                 Camera uiCam = (parentCanvas != null && parentCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? parentCanvas.worldCamera : null;
-
-                // 屏幕物理中心点
                 Vector2 screenCenter = new Vector2(Screen.width / 2f, Screen.height / 2f);
 
-                // 将屏幕中心点转换为容器内的本地坐标（完美适应无限画布的缩放和平移）
                 if (RectTransformUtility.ScreenPointToLocalPointInRectangle(containerRect, screenCenter, uiCam, out Vector2 localCenter))
                 {
                     spawnPos = localCenter;
                 }
 
-                // ==========================================
-                // 【视觉升级 2：生成节点并注入金色呼吸】
-                // ==========================================
                 var newNode = NodeCardManager.Instance.CreateNodeAt(spawnPos);
 
                 if (newNode is NodeController nc)
                 {
                     nc.Data.Title = promptData.Title;
-                    // 注意这里同时保留了上一轮加的清洗换行符逻辑
                     nc.Data.Content = response.Replace("\r", "");
                     nc.RefreshUI();
 
                     newNode.isCognitiveNode = true;
                     newNode.cognitiveType = type.ToString();
 
-                    // 给新诞生的节点注入金色灵魂，持续 20 秒
                     AINodeGlowEffect glow = newNode.gameObject.AddComponent<AINodeGlowEffect>();
                     glow.StartGlow(20f);
 
                     NodeCardManager.Instance.SelectNode(newNode, false);
-                }
 
-                if (UserBehaviorSystem.Instance != null)
-                    UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: "Canvas_Global", info: type.ToString());
+                    // =========================================================
+                    // 【核心修复】：将 targetID 指向 newNode.NodeID
+                    // 并且 info 传 "proactive_global"，配合 Tracker 里的全局打断逻辑
+                    // =========================================================
+                    if (UserBehaviorSystem.Instance != null)
+                        UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: "proactive_global");
+                }
             }
         }, false);
     }
