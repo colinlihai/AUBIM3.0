@@ -110,7 +110,7 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
             }
 
             // =========================================================
-            // 【新增】：检测是否悬停在成文区，呼出金色幽灵光标
+            // 【意图识别】：检测是否悬停在成文区，呼出幽灵光标并立即逻辑归位
             // =========================================================
             bool hoveringOnArticle = false;
             if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy)
@@ -123,10 +123,16 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
                 }
             }
 
-            // 如果移出了成文区，立刻隐藏光标
-            if (!hoveringOnArticle && ArticleGenerator.Instance != null)
+            // 【满足你的绝妙设计】：一旦鼠标进入正文区，立刻归位！
+            if (hoveringOnArticle)
             {
-                ArticleGenerator.Instance.ClearDragDropFeedback();
+                ForceRestoreOriginalState(); // 后台瞬间完美归位
+                ClearAllFeedback();          // 清除导图区的绿线等排版反馈
+                return;                      // 提前退出！不再执行下方的导图断开和重组检测
+            }
+            else
+            {
+                if (ArticleGenerator.Instance != null) ArticleGenerator.Instance.ClearDragDropFeedback();
             }
 
             bool isMultiSelect = _activeProxies.Count > 1;
@@ -281,45 +287,14 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
         }
         _activeProxies.Clear();
 
-        // 【新增 2】：如果是投入成文区，触发生成逻辑并立刻结束
+        // 【极简结算】：如果是投入成文区，触发生成逻辑并立刻结束
         if (droppedOnArticle)
         {
-            // A. 清理拖拽悬停光标
             ArticleGenerator.Instance.ClearDragDropFeedback();
-
-            // B. 将屏幕坐标和节点数据发送给成文区
             ArticleGenerator.Instance.HandleNodeDropped(eventData.position, eventData.pressEventCamera, _myController);
 
-            // C. 恢复被暂时斩断的连线
-            if (NodeLinkManager.Instance != null)
-            {
-                foreach (var pair in _detachedStates)
-                {
-                    if (pair.Key != null && pair.Value.originalParent != null)
-                    {
-                        NodeLinkManager.Instance.CreateConnection(pair.Value.originalParent, pair.Key);
-                        pair.Key.transform.SetSiblingIndex(pair.Value.originalSiblingIndex);
-                    }
-                }
-            }
-            _detachedStates.Clear();
-
-            // =======================================================
-            // 【核心修复】：必须同时恢复坐标和层级索引（SiblingIndex）
-            // 否则同级节点会被 Unity 渲染机制默认扔到父物体的最后面！
-            // =======================================================
-            _targetRect.anchoredPosition = _originalPosition;
-            targetRoot.SetSiblingIndex(_originalSiblingIndex);
-
-            // 触发自动布局刷新，确保父物体排版不乱
-            if (_myController.parentNode != null && AutoLayoutSystem.Instance != null)
-            {
-                AutoLayoutSystem.Instance.RefreshLayout(_myController.parentNode);
-            }
-            else if (AutoLayoutSystem.Instance != null)
-            {
-                AutoLayoutSystem.Instance.RefreshLayout(_myController);
-            }
+            // 兜底归位（如果在 OnDrag 已经完美归位，这里相当于最后一道保险）
+            ForceRestoreOriginalState();
 
             return; // 提前退出，禁止触发画布移动！
         }
@@ -616,5 +591,52 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
             return true;
         }
         return false;
+    }
+
+    // ==========================================
+    // 核心修复：强行无损恢复节点的初始状态和顺序
+    // ==========================================
+    private void ForceRestoreOriginalState()
+    {
+        // 1. 恢复被斩断的连线
+        if (NodeLinkManager.Instance != null)
+        {
+            foreach (var pair in _detachedStates)
+            {
+                if (pair.Key != null && pair.Value.originalParent != null)
+                {
+                    NodeLinkManager.Instance.CreateConnection(pair.Value.originalParent, pair.Key);
+                    // 恢复 Unity 物理层级
+                    pair.Key.transform.SetSiblingIndex(pair.Value.originalSiblingIndex);
+                    // 【核心修复】：必须重排数据列表，防止被 AutoLayout 扔到最下面！
+                    NodeLinkManager.Instance.ReorderChildren(pair.Value.originalParent);
+                }
+            }
+        }
+        _detachedStates.Clear();
+
+        // 2. 恢复自己原本的坐标和层级
+        _targetRect.anchoredPosition = _originalPosition;
+        targetRoot.SetSiblingIndex(_originalSiblingIndex);
+
+        // 如果自己有父节点，再对父节点进行一次重排，确保万无一失
+        if (_originalParent != null)
+        {
+            var pNode = _originalParent.GetComponent<BaseNodeController>();
+            if (pNode != null && NodeLinkManager.Instance != null)
+            {
+                NodeLinkManager.Instance.ReorderChildren(pNode);
+            }
+        }
+
+        // 3. 触发自动布局，立刻生效
+        if (_myController.parentNode != null && AutoLayoutSystem.Instance != null)
+        {
+            AutoLayoutSystem.Instance.RefreshLayout(_myController.parentNode);
+        }
+        else if (AutoLayoutSystem.Instance != null)
+        {
+            AutoLayoutSystem.Instance.RefreshLayout(_myController);
+        }
     }
 }
