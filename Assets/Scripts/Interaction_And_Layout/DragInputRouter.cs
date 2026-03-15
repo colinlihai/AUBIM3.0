@@ -65,6 +65,8 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
 
     public void OnBeginDrag(PointerEventData eventData)
     {
+        if (eventData.button != PointerEventData.InputButton.Left) return;
+
         if (CanvasPanZoomController.Instance != null)
         {
             CanvasPanZoomController.Instance.ForceCancelBoxSelection();
@@ -94,6 +96,8 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
 
     public void OnDrag(PointerEventData eventData)
     {
+        if (eventData.button != PointerEventData.InputButton.Left) return;
+
         var visual = GetComponentInParent<CoreBodyVisual>();
         if (visual != null && visual.IsEditing) return;
 
@@ -254,10 +258,12 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
 
     public void OnEndDrag(PointerEventData eventData)
     {
+        if (eventData.button != PointerEventData.InputButton.Left) return;
+
         ClearAllFeedback();
 
         // =========================================================
-        // 【新增 1】：检测是否拖拽到了成文区的正文输入框中
+        // 检测是否拖拽到了成文区的正文输入框中
         // =========================================================
         bool droppedOnArticle = false;
         if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy)

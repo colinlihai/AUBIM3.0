@@ -17,6 +17,9 @@ public class AutoLayoutSystem : MonoBehaviour
     // 记录正在移动的协程，防止冲突
     private Dictionary<BaseNodeController, Coroutine> _activeMoves = new Dictionary<BaseNodeController, Coroutine>();
 
+    // 记录正在等待排版的树根，防止同一帧内重复排版（防抖优化）
+    private HashSet<BaseNodeController> _pendingLayoutRoots = new HashSet<BaseNodeController>();
+
     void Awake()
     {
         Instance = this;
@@ -25,15 +28,40 @@ public class AutoLayoutSystem : MonoBehaviour
     /// <summary>
     /// 整理某个节点所在的整棵树
     /// </summary>
+    /// <summary>
+    /// 整理某个节点所在的整棵树
+    /// </summary>
     public void RefreshLayout(BaseNodeController nodeInTree)
     {
-        if (nodeInTree == null) return;
+        if (nodeInTree == null || !gameObject.activeInHierarchy) return;
 
         // 1. 找到老祖宗 (从根开始排)
         BaseNodeController root = FindTreeRoot(nodeInTree);
 
-        // 2. 开始排布
-        ArrangeTree(root);
+        // 2. 防抖机制 (Debounce)：如果这棵树已经在等待排版了，就不重复执行
+        if (root != null && !_pendingLayoutRoots.Contains(root))
+        {
+            _pendingLayoutRoots.Add(root);
+            StartCoroutine(DelayedArrangeTree(root));
+        }
+    }
+
+    // =========================================================
+    // 【核心修复】：延迟一帧排版，解决文本瞬间赋值后的重叠问题
+    // =========================================================
+    private IEnumerator DelayedArrangeTree(BaseNodeController root)
+    {
+        // 必须等待一帧！让 TextMeshPro 和 UGUI 彻底计算完长文本撑开的物理尺寸
+        yield return null;
+
+        // 从等待队列中移除
+        _pendingLayoutRoots.Remove(root);
+
+        // 确保节点还没被删掉
+        if (root != null && root.gameObject.activeInHierarchy)
+        {
+            ArrangeTree(root);
+        }
     }
 
     public void ArrangeAll()

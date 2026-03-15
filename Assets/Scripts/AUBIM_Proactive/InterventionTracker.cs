@@ -97,7 +97,19 @@ public class InterventionTracker : MonoBehaviour
         // 模块 1：自适应静默检测器 (Adaptive Stall Timer)
         if (!_isBreathingActive && !_isObserving && !isSuspendedByChat)
         {
-            if (Input.anyKey || Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) || Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f)
+            bool isPromptFocused = false;
+            if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articlePromptInput != null)
+            {
+                isPromptFocused = ArticleGenerator.Instance.articlePromptInput.isFocused;
+            }
+
+            bool isUsingIME = !string.IsNullOrEmpty(Input.compositionString);
+            // 如果这一帧有字符被正式输入到系统
+            bool hasTextInput = !string.IsNullOrEmpty(Input.inputString);
+
+            // 只要有任何按键、鼠标操作、聚焦在 Prompt、或者正在用中文输入法打字，统统归零！
+            if (Input.anyKey || Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) ||
+                Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f || isPromptFocused || isUsingIME || hasTextInput)
             {
                 _idleTimer = 0f;
             }
@@ -194,14 +206,9 @@ public class InterventionTracker : MonoBehaviour
                 // ==================================================
                 Debug.Log($"<color=cyan>[Tracker 全局介入]</color> 用户全局静默，直接空投 {bestType} 节点！");
 
-                // 因为没有 UI 按钮需要等待用户点击，所以直接结束 Breathing 状态
-                _isBreathingActive = false;
-
-                // 直接呼叫生成系统，由于 selectedNodes == 0，
-                // 它会完美触发我们上一步写好的 GenerateGlobalNodeIntervention！
-                if (ProactiveInterventionSystem.Instance != null)
+                if (GlobalProactiveButton.Instance != null)
                 {
-                    ProactiveInterventionSystem.Instance.TriggerInterventionByType(bestType);
+                    GlobalProactiveButton.Instance.StartGlobalBreathing(bestType);
                 }
             }
         }
@@ -412,7 +419,7 @@ public class InterventionTracker : MonoBehaviour
         }
     }
 
-    // 【新增】：当用户进行了主动操作（如切换节点）时，强行中断局部 AI 的呼唤
+    // 当用户进行了主动操作（如切换节点）时，强行中断局部 AI 的呼唤
     public void AbortLocalBreathing()
     {
         if (!_isBreathingActive) return;
@@ -428,6 +435,12 @@ public class InterventionTracker : MonoBehaviour
                     actuallyAborted = true;
                 }
             }
+        }
+
+        if (GlobalProactiveButton.Instance != null && GlobalProactiveButton.Instance.isBreathing)
+        {
+            GlobalProactiveButton.Instance.StopBreathingEarly();
+            actuallyAborted = true;
         }
 
         if (actuallyAborted)

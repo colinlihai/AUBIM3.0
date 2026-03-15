@@ -132,13 +132,19 @@ public class ProactiveInterventionSystem : MonoBehaviour
                     newNode.isCognitiveNode = true;
                     newNode.cognitiveType = type.ToString();
 
-                    if (NodeLinkManager.Instance != null) NodeLinkManager.Instance.CreateConnection(targetNode, newNode);
+                    if (NodeLinkManager.Instance != null)
+                    {
+                        NodeLinkManager.Instance.CreateConnection(targetNode, newNode);
+
+                        // 强制触发自动布局，确保 AI 节点完美排列，不遮挡其他节点
+                        if (AutoLayoutSystem.Instance != null)
+                        {
+                            AutoLayoutSystem.Instance.RefreshLayout(targetNode);
+                        }
+                    }
+
                     NodeCardManager.Instance.SelectNode(newNode, false);
 
-                    // =========================================================
-                    // 【核心修复】：将 targetID 指向 newNode.NodeID
-                    // 这样 ML Tracker 才知道要去监视这个新诞生的 AI 节点的命运
-                    // =========================================================
                     if (UserBehaviorSystem.Instance != null)
                         UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: type.ToString());
                 }
@@ -149,7 +155,7 @@ public class ProactiveInterventionSystem : MonoBehaviour
     // ==========================================
     // 逻辑 1.5：导图区生成全局节点
     // ==========================================
-    private void GenerateGlobalNodeIntervention(InterventionType type)
+    public void GenerateGlobalNodeIntervention(InterventionType type, bool isManual = false)
     {
         if (ProjectContextGatherer.Instance == null) return;
 
@@ -164,7 +170,9 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
         var promptData = AIPromptLibrary.GetNodeInterventionPrompt(type, isGlobal: true);
 
-        string prompt = $"{promptData.RolePrompt}\n当前全图拓扑大纲：\n{fullContext}\n直接输出生成的内容，不要带任何废话或引号。";
+        // 如果是用户主动点击的，稍微改一下指令语气
+        string userIntent = isManual ? "\n用户正在主动寻求全局维度的审查与建议。" : "";
+        string prompt = $"{promptData.RolePrompt}{userIntent}\n当前全图拓扑大纲：\n{fullContext}\n直接输出生成的内容，不要带任何废话或引号。";
 
         if (ToastSystem.Instance != null) ToastSystem.Instance.Show("AI 正在洞察全局导图...");
 
@@ -187,6 +195,9 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
                 if (newNode is NodeController nc)
                 {
+                    nc.Data.Title = isManual ? $"{promptData.Title}" : promptData.Title;
+                    nc.Data.Content = response.Replace("\r", "");
+
                     nc.Data.Title = promptData.Title;
                     nc.Data.Content = response.Replace("\r", "");
                     nc.RefreshUI();
@@ -197,14 +208,29 @@ public class ProactiveInterventionSystem : MonoBehaviour
                     AINodeGlowEffect glow = newNode.gameObject.AddComponent<AINodeGlowEffect>();
                     glow.StartGlow(20f);
 
+                    if (AutoLayoutSystem.Instance != null)
+                    {
+                        AutoLayoutSystem.Instance.RefreshLayout(newNode);
+                    }
+
                     NodeCardManager.Instance.SelectNode(newNode, false);
 
                     // =========================================================
-                    // 【核心修复】：将 targetID 指向 newNode.NodeID
-                    // 并且 info 传 "proactive_global"，配合 Tracker 里的全局打断逻辑
+                    // 【埋点区分】：主动 vs 被动
                     // =========================================================
                     if (UserBehaviorSystem.Instance != null)
-                        UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: "proactive_global");
+                    {
+                        if (isManual)
+                        {
+                            // 记录为用户的“主动功能使用”
+                            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: "ManualTriggered");
+                        }
+                        else
+                        {
+                            // 记录为 AI 的“被动发呆介入” (这才会触发 Tracker 的 45 秒观察期)
+                            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: "proactive_global");
+                        }
+                    }
                 }
             }
         }, false);
@@ -216,6 +242,16 @@ public class ProactiveInterventionSystem : MonoBehaviour
     private void GenerateArticleIntervention(InterventionType type)
     {
         if (ArticleGenerator.Instance == null || ArticleGenerator.Instance.mainBodyInput == null) return;
+
+        if (ArticleGenerator.Instance.articlePromptInput != null)
+        {
+            string currentPromptText = ArticleGenerator.Instance.articlePromptInput.text;
+            if (!string.IsNullOrWhiteSpace(currentPromptText))
+            {
+                Debug.Log($"<color=yellow>[AI 主动介入]</color> 检测到用户在 Prompt 框已有草稿，为保护用户数据，取消本次生成。");
+                return; // 直接打断施法，不再调用 LLM！
+            }
+        }
 
         string draftText = ArticleGenerator.Instance.mainBodyInput.text;
         int textLength = draftText.Length;
@@ -286,6 +322,15 @@ public class ProactiveInterventionSystem : MonoBehaviour
 
         LLMManager.Instance.TaskChat(prompt, (response, success) =>
         {
+            if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articlePromptInput != null)
+            {
+                if (!string.IsNullOrWhiteSpace(ArticleGenerator.Instance.articlePromptInput.text))
+                {
+                    Debug.Log($"<color=yellow>[AI 主动介入]</color> AI 返回结果时，用户已开始输入内容，放弃覆盖上屏。");
+                    return; // 防止网络请求延时，就算 LLM 生成得再好也扔掉，保卫用户数据！
+                }
+            }
+
             if (success && !string.IsNullOrWhiteSpace(response) && ArticleGenerator.Instance.articlePromptInput != null)
             {
                 string cleanResponse = response.Trim().Replace("\n", "").Replace("\r", "");

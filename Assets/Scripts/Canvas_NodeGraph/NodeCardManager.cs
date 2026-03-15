@@ -393,12 +393,16 @@ public class NodeCardManager : MonoBehaviour
         if (sibling != null)
         {
             LayoutRebuilder.ForceRebuildLayoutImmediate(sibling.GetComponent<RectTransform>());
+            int targetSiblingIndex = current.transform.GetSiblingIndex() + 1;
+            sibling.transform.SetSiblingIndex(targetSiblingIndex);
+
             if (parent != null)
             {
                 // 有爸爸，连同一个爸爸
                 if (NodeLinkManager.Instance != null)
                 {
                     NodeLinkManager.Instance.CreateConnection(parent, sibling);
+                    NodeLinkManager.Instance.ReorderChildren(parent);
                 }
                 if (AutoLayoutSystem.Instance != null)
                 {
@@ -450,7 +454,7 @@ public class NodeCardManager : MonoBehaviour
         BaseNodeController controller = newCardObj.GetComponent<BaseNodeController>();
         if (controller != null)
         {
-            // [新增] 注册到命令系统，使其可以被 Ctrl+Z 撤销
+            // 注册到命令系统，使其可以被 Ctrl+Z 撤销
             if (CommandManager.Instance != null)
             {
                 var cmd = new CreateNodeCommand(controller);

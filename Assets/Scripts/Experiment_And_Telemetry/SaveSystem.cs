@@ -12,6 +12,7 @@ public class SaveSystem : MonoBehaviour
 
     [Header("配置")]
     public string fileExtension = ".aubim";
+    public string currentSaveName = "未命名项目";
 
     [Header("引用")]
     public ArticleGenerator articleGen; // 用于保存文章状态
@@ -69,6 +70,8 @@ public class SaveSystem : MonoBehaviour
     // ========================================================================
     public async void SaveProject(string saveName)
     {
+        if (saveName != "AutoSave") currentSaveName = saveName;
+
         ProjectSaveData data = new ProjectSaveData();
         data.SaveName = saveName;
         data.Timestamp = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
@@ -177,6 +180,8 @@ public class SaveSystem : MonoBehaviour
 
         try
         {
+            currentSaveName = saveName;
+
             string json = File.ReadAllText(path);
             ProjectSaveData data = JsonUtility.FromJson<ProjectSaveData>(json);
             StartCoroutine(ReconstructScene(data));
@@ -325,6 +330,8 @@ public class SaveSystem : MonoBehaviour
     // =========================================================
     public void CreateNewProject()
     {
+        currentSaveName = "未命名项目_" + DateTime.Now.ToString("MMdd_HHmm");
+
         StartCoroutine(ClearSceneRoutine());
 
         if (UserBehaviorSystem.Instance != null)

@@ -78,7 +78,7 @@ public class ArticleGenerator : MonoBehaviour
             }
 
             // ==========================================
-            // 【新增】：侦测 Prompt 输入框的“点击进入”事件
+            // 侦测 Prompt 输入框的“点击进入”事件
             // ==========================================
             bool isPromptFocused = (articlePromptInput != null && articlePromptInput.isFocused) ||
                                    (promptInput != null && promptInput.isFocused);
@@ -134,6 +134,21 @@ public class ArticleGenerator : MonoBehaviour
     {
         if (regenerateBtnText == null) return;
 
+        // ==========================================
+        // 1. 最高优先级：判断当前是否有 AI 主动介入正在等待被采纳
+        // ==========================================
+        bool isHandlingProactiveIntervention = _promptController != null && !string.IsNullOrEmpty(_promptController.CurrentPromptInterventionType);
+
+        if (isHandlingProactiveIntervention)
+        {
+            // 只有当真正的金色/灰色 AI 呼吸占位符存在时，才显示“采纳建议”
+            regenerateBtnText.text = "采纳建议";
+            return;
+        }
+
+        // ==========================================
+        // 2. 如果没有主动介入，则进入手动模式的四向路由 UI 匹配
+        // ==========================================
         bool hasTextSelection = false;
         if (mainBodyInput != null)
         {
@@ -141,46 +156,70 @@ public class ArticleGenerator : MonoBehaviour
         }
 
         bool hasNodeSelection = NodeCardManager.Instance != null && NodeCardManager.Instance.HasSelection();
-        bool hasProactivePrompt = articlePromptInput != null && !string.IsNullOrWhiteSpace(articlePromptInput.text);
+        bool isBodyEmpty = mainBodyInput == null || string.IsNullOrWhiteSpace(mainBodyInput.text);
 
-        if (hasTextSelection) regenerateBtnText.text = "局部润色";
-        else if (hasNodeSelection) regenerateBtnText.text = "选中节点";
-        else if (hasProactivePrompt) regenerateBtnText.text = "采纳建议";
-        else regenerateBtnText.text = "全局生成";
+        // 严格对应我们的路由逻辑 A, B, C, D
+        if (hasTextSelection)
+        {
+            regenerateBtnText.text = "局部润色";    // 路由 A：选中了正文
+        }
+        else if (hasNodeSelection)
+        {
+            regenerateBtnText.text = "节点生成";    // 路由 B：选中了思维导图节点
+        }
+        else if (isBodyEmpty)
+        {
+            regenerateBtnText.text = "全局生成";    // 路由 C：正文为空，结合全节点从零写起
+        }
+        else
+        {
+            regenerateBtnText.text = "全文优化";    // 路由 D：正文有字，没选正文也没选节点，针对全文提要求
+        }
     }
 
     public void OnRegenerateClicked()
     {
+        // 1. 判断当前是否是系统在闪烁金光（等待用户采纳发呆建议）
         bool isHandlingProactiveIntervention = _promptController != null && !string.IsNullOrEmpty(_promptController.CurrentPromptInterventionType);
 
         if (isHandlingProactiveIntervention)
         {
+            // 如果是，结算这次 AI 介入，直接走之前的占位符上屏逻辑
             _promptController.SettlePromptIntention();
+            if (UserBehaviorSystem.Instance != null)
+                UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ProactiveAccepted", 1);
+
+            return; // 核心修改：如果是采纳系统主动发呆建议，直接 return 结束！不再走后面的生成逻辑！
         }
 
+        // 2. 如果不是采纳建议，那就是真正的“手动发起请求”
         string userInstruction = "";
-        bool usedBottomPrompt = false;
 
         if (articlePromptInput != null && !string.IsNullOrWhiteSpace(articlePromptInput.text))
         {
             userInstruction = articlePromptInput.text;
-            usedBottomPrompt = true;
-            articlePromptInput.text = "";
+            articlePromptInput.text = ""; // 清空输入框
         }
         else if (promptInput != null && !string.IsNullOrWhiteSpace(promptInput.text))
         {
             userInstruction = promptInput.text;
+            promptInput.text = "";
         }
 
-        if (promptInput != null) promptInput.text = "";
         if (mainBodyInput == null || aiSuggestionInput == null) return;
 
+        // 获取用户当前的选中状态
         int startIdx = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
         int endIdx = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
         bool hasTextSelection = (endIdx > startIdx);
         bool hasNodeSelection = NodeCardManager.Instance != null && NodeCardManager.Instance.HasSelection();
+        bool isBodyEmpty = string.IsNullOrWhiteSpace(mainBodyInput.text);
 
-        // 终极四向路由
+        // ==========================================
+        // 终极精准路由树：区分用户手动输入的 4 种意图
+        // ==========================================
+
+        // 路由 A：局部润色 (选中了正文)
         if (hasTextSelection)
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Local, "ArticleModal", "LocalRefine", endIdx - startIdx);
@@ -193,26 +232,56 @@ public class ArticleGenerator : MonoBehaviour
 
             StartCoroutine(HandleLocalRefinement(selectedText, fullText.Substring(contextStart, startIdx - contextStart), fullText.Substring(endIdx, contextEnd - endIdx), userInstruction));
         }
+
+        // 路由 B：局部扩写 (没选正文，但选中了导图节点)
         else if (hasNodeSelection)
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Node, "ArticleModal", "NodeGenerate", 1);
             if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请根据我提取的这些核心节点素材，详细扩写并连贯成文";
+
+            // 注意：此时 ConcatTreeData 内部会自动根据 HasSelection() 过滤，只拼装选中的节点
             StartCoroutine(HandleFullGeneration(userInstruction));
         }
-        else if (usedBottomPrompt || isHandlingProactiveIntervention)
+
+        // 路由 C：从零开始 (正文是空的，且没选任何东西)
+        else if (isBodyEmpty)
         {
-            if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ContextualExpand", 1);
-            string draftText = mainBodyInput.text;
-            int cursorIndex = lastKnownCaretPosition > 0 ? lastKnownCaretPosition : draftText.Length;
-            int extractLength = Mathf.Min(cursorIndex, 300);
-            string tailContext = draftText.Substring(cursorIndex - extractLength, extractLength);
-            StartCoroutine(HandleContextualExpansion(tailContext, userInstruction));
+            if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate_FromScratch", 1);
+            if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请根据全局导图的逻辑结构，从零开始写一篇结构严谨的文章";
+
+            // 全局节点 + 用户指令 -> 生成初稿
+            StartCoroutine(HandleFullGeneration(userInstruction));
         }
+
+        // 路由 D：宏观调整/全局审视 (正文有字，没选正文也没选节点)
+        // 修复：这里以前被错误地当成了“续写”，现在修正为针对全篇的建议或重写
         else
         {
-            if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate", 1);
-            if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请根据全局导图的逻辑结构，写一篇结构严谨的完整文章";
-            StartCoroutine(HandleFullGeneration(userInstruction));
+            if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate_RefineAll", 1);
+            if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请审视当前全文的逻辑与连贯性，并给出重写或优化建议";
+
+            string currentFullText = mainBodyInput.text;
+            // 因为字数可能很多，我们需要截取防爆（大模型一次吃不下太多）
+            if (currentFullText.Length > 2000) currentFullText = currentFullText.Substring(0, 2000) + "\n...(后略)";
+
+            // 专门写一个新的 Prompt 调用，融合 全文 + 导图大纲 + 用户指令
+            string finalPrompt = $@"你是一个高级编辑。用户正在对整篇文章提出全局修改要求。
+【用户的全局修改指令】：
+{userInstruction}
+
+【当前文章全文】(绝不要直接重复原文，只输出基于指令的修改结果或建议)：
+{currentFullText}";
+
+            aiSuggestionInput.text = "AI 正在纵览全文并根据您的指令进行重构，请稍候...";
+
+            if (LLMManager.Instance != null)
+            {
+                LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
+                {
+                    if (success) aiSuggestionInput.text = FormatChineseArticle(response);
+                    else aiSuggestionInput.text = "生成失败: " + response;
+                });
+            }
         }
     }
 
@@ -323,7 +392,67 @@ public class ArticleGenerator : MonoBehaviour
         mainBodyInput.text = (newText + rawData).Replace("\r", "");
     }
 
-    public void ExportToTxt() { /* 原有逻辑保留 */ }
+    public void ExportToTxt()
+    {
+        if (mainBodyInput == null || string.IsNullOrWhiteSpace(mainBodyInput.text))
+        {
+            if (ToastSystem.Instance != null) ToastSystem.Instance.Show("正文区为空，没有可导出的内容！");
+            return;
+        }
+
+        try
+        {
+            // 1. 获取目标文件夹路径
+            string targetFolder;
+            if (ExperimentManager.Instance != null && !string.IsNullOrWhiteSpace(ExperimentManager.Instance.currentSubjectID))
+            {
+                string userRoot = ExperimentManager.GetUserFolderPath();
+                targetFolder = Path.Combine(userRoot, "article");
+            }
+            else
+            {
+                targetFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "AUBIM_文章导出");
+            }
+
+            if (!Directory.Exists(targetFolder))
+            {
+                Directory.CreateDirectory(targetFolder);
+            }
+
+            // 2. 获取当前项目名称作为文件名
+            string projectName = "未命名项目";
+            if (SaveSystem.Instance != null && !string.IsNullOrWhiteSpace(SaveSystem.Instance.currentSaveName))
+            {
+                projectName = SaveSystem.Instance.currentSaveName;
+            }
+
+            // 【防爆设计】：过滤掉项目名中可能包含的非法路径字符 (如 \ / : * ? " < > |)
+            foreach (char c in Path.GetInvalidFileNameChars())
+            {
+                projectName = projectName.Replace(c.ToString(), "");
+            }
+
+            string fileName = $"{projectName}.txt";
+            string fullPath = Path.Combine(targetFolder, fileName);
+
+            // 3. 将正文内容以 UTF-8 编码写入 TXT 文件
+            // 注：File.WriteAllText 默认行为就是“如果文件存在，则完全覆盖它”，完美契合需求
+            File.WriteAllText(fullPath, mainBodyInput.text, Encoding.UTF8);
+
+            // 4. 视觉与日志反馈
+            if (ToastSystem.Instance != null)
+                ToastSystem.Instance.Show($"已保存至: {fileName}");
+
+            Debug.Log($"<color=green>[导出成功]</color> 文章已覆盖归档至: {fullPath}");
+        }
+        catch (Exception e)
+        {
+            if (ToastSystem.Instance != null)
+                ToastSystem.Instance.Show("导出失败，请查看控制台日志");
+
+            Debug.LogError($"[导出失败] 无法导出 TXT 文件: {e.Message}");
+        }
+    }
     public void ClearAISuggestion() { if (aiSuggestionInput != null) aiSuggestionInput.text = ""; }
 
     public void OnOpenModal()
