@@ -21,7 +21,6 @@ public class ArticleGenerator : MonoBehaviour
 
     [Header("UI - Header 区域")]
     public Button exportBtn;
-    public Button reloadBtn;
     public TMP_InputField promptInput;
     public Button regenerateBtn;
     public TMP_Text regenerateBtnText;
@@ -60,7 +59,6 @@ public class ArticleGenerator : MonoBehaviour
         if (closeBtn != null) closeBtn.onClick.AddListener(CloseModal);
         if (exportBtn != null) exportBtn.onClick.AddListener(ExportToTxt);
         if (regenerateBtn != null) regenerateBtn.onClick.AddListener(OnRegenerateClicked);
-        if (reloadBtn != null) reloadBtn.onClick.AddListener(OnImportOutlineClicked);
         if (clearSuggestionBtn != null) clearSuggestionBtn.onClick.AddListener(ClearAISuggestion);
 
         if (articleModal != null) articleModal.SetActive(false);
@@ -179,26 +177,29 @@ public class ArticleGenerator : MonoBehaviour
 
     public void OnRegenerateClicked()
     {
-        // 1. 判断当前是否是系统在闪烁金光（等待用户采纳发呆建议）
         bool isHandlingProactiveIntervention = _promptController != null && !string.IsNullOrEmpty(_promptController.CurrentPromptInterventionType);
+
+        // 记录一下 AI 刚才介入的类型，用来指引后面的路由
+        string previousInterventionType = "";
 
         if (isHandlingProactiveIntervention)
         {
-            // 如果是，结算这次 AI 介入，直接走之前的占位符上屏逻辑
+            previousInterventionType = _promptController.CurrentPromptInterventionType;
+
+            // 结算这次 AI 介入（停止闪烁金光等视觉效果）
             _promptController.SettlePromptIntention();
+
             if (UserBehaviorSystem.Instance != null)
                 UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ProactiveAccepted", 1);
 
-            return; // 核心修改：如果是采纳系统主动发呆建议，直接 return 结束！不再走后面的生成逻辑！
         }
 
-        // 2. 如果不是采纳建议，那就是真正的“手动发起请求”
+        // 2. 读取指令并清空输入框
         string userInstruction = "";
-
         if (articlePromptInput != null && !string.IsNullOrWhiteSpace(articlePromptInput.text))
         {
             userInstruction = articlePromptInput.text;
-            articlePromptInput.text = ""; // 清空输入框
+            articlePromptInput.text = ""; // 采纳并执行后，清空框，显得非常干净
         }
         else if (promptInput != null && !string.IsNullOrWhiteSpace(promptInput.text))
         {
@@ -208,7 +209,6 @@ public class ArticleGenerator : MonoBehaviour
 
         if (mainBodyInput == null || aiSuggestionInput == null) return;
 
-        // 获取用户当前的选中状态
         int startIdx = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
         int endIdx = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
         bool hasTextSelection = (endIdx > startIdx);
@@ -216,7 +216,7 @@ public class ArticleGenerator : MonoBehaviour
         bool isBodyEmpty = string.IsNullOrWhiteSpace(mainBodyInput.text);
 
         // ==========================================
-        // 终极精准路由树：区分用户手动输入的 4 种意图
+        // 终极精准路由树：区分 5 种意图
         // ==========================================
 
         // 路由 A：局部润色 (选中了正文)
@@ -233,40 +233,49 @@ public class ArticleGenerator : MonoBehaviour
             StartCoroutine(HandleLocalRefinement(selectedText, fullText.Substring(contextStart, startIdx - contextStart), fullText.Substring(endIdx, contextEnd - endIdx), userInstruction));
         }
 
-        // 路由 B：局部扩写 (没选正文，但选中了导图节点)
+        // 路由 B：局部扩写 (选中了导图节点)
         else if (hasNodeSelection)
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Node, "ArticleModal", "NodeGenerate", 1);
             if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请根据我提取的这些核心节点素材，详细扩写并连贯成文";
-
-            // 注意：此时 ConcatTreeData 内部会自动根据 HasSelection() 过滤，只拼装选中的节点
             StartCoroutine(HandleFullGeneration(userInstruction));
         }
 
-        // 路由 C：从零开始 (正文是空的，且没选任何东西)
+        // 路由 C：从零开始 (正文是空的)
         else if (isBodyEmpty)
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate_FromScratch", 1);
             if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请根据全局导图的逻辑结构，从零开始写一篇结构严谨的文章";
-
-            // 全局节点 + 用户指令 -> 生成初稿
             StartCoroutine(HandleFullGeneration(userInstruction));
         }
 
-        // 路由 D：宏观调整/全局审视 (正文有字，没选正文也没选节点)
-        // 修复：这里以前被错误地当成了“续写”，现在修正为针对全篇的建议或重写
+        // 路由 E：顺势续写 
+        // 【核心修复】：如果 AI 刚才的介入类型是 ArticleGap（代表填补空缺/顺势推进），
+        // 或者用户什么都没选且光标在末尾，就强制走顺势续写，绝不去重写全文！
+        else if (previousInterventionType == InterventionType.ArticleGap.ToString() ||
+                (!hasTextSelection && mainBodyInput.selectionFocusPosition >= mainBodyInput.text.Length - 10 && string.IsNullOrWhiteSpace(userInstruction)))
+        {
+            if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ContextualExpand", 1);
+            if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请顺着前文的逻辑，自然地续写接下来的 1-2 个段落。";
+
+            string draftText = mainBodyInput.text;
+            int extractLength = Mathf.Min(draftText.Length, 300);
+            string tailContext = draftText.Substring(draftText.Length - extractLength);
+
+            StartCoroutine(HandleContextualExpansion(tailContext, userInstruction));
+        }
+
+        // 路由 D：宏观调整/全局审视 (正文有字，且不需要续写，比如 AI 的介入类型是 ArticleReflect 全局反思)
         else
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate_RefineAll", 1);
             if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请审视当前全文的逻辑与连贯性，并给出重写或优化建议";
 
             string currentFullText = mainBodyInput.text;
-            // 因为字数可能很多，我们需要截取防爆（大模型一次吃不下太多）
             if (currentFullText.Length > 2000) currentFullText = currentFullText.Substring(0, 2000) + "\n...(后略)";
 
-            // 专门写一个新的 Prompt 调用，融合 全文 + 导图大纲 + 用户指令
             string finalPrompt = $@"你是一个高级编辑。用户正在对整篇文章提出全局修改要求。
-【用户的全局修改指令】：
+【用户的修改指令】：
 {userInstruction}
 
 【当前文章全文】(绝不要直接重复原文，只输出基于指令的修改结果或建议)：
@@ -274,11 +283,22 @@ public class ArticleGenerator : MonoBehaviour
 
             aiSuggestionInput.text = "AI 正在纵览全文并根据您的指令进行重构，请稍候...";
 
+            // 上锁免打扰
+            if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
+
             if (LLMManager.Instance != null)
             {
                 LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
                 {
-                    if (success) aiSuggestionInput.text = FormatChineseArticle(response);
+                    // 解锁并给缓冲
+                    if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
+
+                    if (success)
+                    {
+                        string cleanRes = FormatChineseArticle(response);
+                        aiSuggestionInput.text = cleanRes;
+                        if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
+                    }
                     else aiSuggestionInput.text = "生成失败: " + response;
                 });
             }
@@ -304,12 +324,22 @@ public class ArticleGenerator : MonoBehaviour
 {rawContextData}";
 
         aiSuggestionInput.text = "AI 正在撰写内容，请稍候...";
+
+        if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
+
         if (LLMManager.Instance != null)
         {
             bool finished = false;
             LLMManager.Instance.TaskChat(fullPrompt, (response, success) =>
             {
-                if (success) aiSuggestionInput.text = FormatChineseArticle(response);
+                if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
+
+                if (success)
+                {
+                    aiSuggestionInput.text = FormatChineseArticle(response);
+                    // 【新增】：按字数发放大礼包，1000字就给 100 秒阅读免打扰
+                    if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(response.Length);
+                }
                 else aiSuggestionInput.text = "生成失败，请重试。\n错误信息: " + response;
                 finished = true;
             });
@@ -336,16 +366,22 @@ public class ArticleGenerator : MonoBehaviour
 
         aiSuggestionInput.text = displayPrefix + "AI 正在思考并深度重构选中段落，请稍候...";
 
+        if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
+
         if (LLMManager.Instance != null)
         {
             bool finished = false;
             LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
             {
+                if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
+
                 if (success)
                 {
                     string cleanRes = FormatChineseArticle(response.Replace("处理后：", "").Replace("【选中文本】", "").Trim());
                     // 成功后，将润色结果直接接在原文的下方展示
                     aiSuggestionInput.text = displayPrefix + $"【润色结果】\n{cleanRes}";
+
+                    if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
                 }
                 else
                 {
@@ -367,12 +403,24 @@ public class ArticleGenerator : MonoBehaviour
 【规则】：严格顺着指令撰写接下来的1-2个新段落，无缝衔接前文，不带废话。";
 
         aiSuggestionInput.text = "AI 正在结合前文，为您构思接下来的内容...";
+
+        if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
+
         if (LLMManager.Instance != null)
         {
             bool finished = false;
             LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
             {
-                if (success) aiSuggestionInput.text = FormatChineseArticle(response.Replace("续写如下：", "").Trim());
+                if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
+
+                if (success)
+                {
+                    string cleanRes = FormatChineseArticle(response.Replace("续写如下：", "").Trim());
+                    aiSuggestionInput.text = cleanRes;
+
+                    // 发放阅读缓冲
+                    if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
+                }
                 else aiSuggestionInput.text = "生成失败: " + response;
                 finished = true;
             });
@@ -383,14 +431,6 @@ public class ArticleGenerator : MonoBehaviour
     // ==========================================
     // 基础 UI 与辅助功能 
     // ==========================================
-    public void OnImportOutlineClicked()
-    {
-        string rawData = ConcatTreeData();
-        if (string.IsNullOrWhiteSpace(rawData)) return;
-        string newText = mainBodyInput.text;
-        if (!string.IsNullOrWhiteSpace(newText) && !newText.EndsWith("\n")) newText += "\n\n";
-        mainBodyInput.text = (newText + rawData).Replace("\r", "");
-    }
 
     public void ExportToTxt()
     {

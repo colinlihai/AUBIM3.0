@@ -228,7 +228,7 @@ public class ProactiveInterventionSystem : MonoBehaviour
                         else
                         {
                             // 记录为 AI 的“被动发呆介入” (这才会触发 Tracker 的 45 秒观察期)
-                            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: "proactive_global");
+                            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: newNode.NodeID, info: type.ToString());
                         }
                     }
                 }

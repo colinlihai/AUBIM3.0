@@ -4,9 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System;
 
-// ==========================================
-// 升级版：为强化学习准备的连续奖励数据结构
-// ==========================================
 [Serializable]
 public class MLDataPoint
 {
@@ -48,8 +45,28 @@ public class InterventionTracker : MonoBehaviour
     [Header("跨区意图锁")]
     public bool isSuspendedByChat = false;
 
+    public bool isAIProcessing = false;   // 记录 AI 是否正在请求网络
+    private float _readingBuffer = 0f;    // 阅读免打扰倒计时
+
+    // 供外部 AI 生成器呼叫
+    public void SetAIProcessing(bool isProcessing)
+    {
+        isAIProcessing = isProcessing;
+        if (isProcessing) _idleTimer = 0f; // 一旦开始生成，发呆计时彻底清零
+    }
+
+    // 供外部按字数分配阅读时间
+    public void GrantReadingBuffer(int charCount)
+    {
+        // 假设人类阅读中文的舒适速度约为 10字/秒
+        // 给予等比例的缓冲时间，最高不超过 120 秒（2分钟）
+        _readingBuffer = Mathf.Clamp(charCount * 0.1f, 0f, 120f);
+        _idleTimer = 0f;
+        Debug.Log($"<color=cyan>[Tracker]</color> AI 输出了 {charCount} 字，进入阅读免打扰模式，静默倒计时延长 {_readingBuffer:F1} 秒。");
+    }
+
     // ==========================================
-    // 新增：精准意图锁控制方法
+    // 精准意图锁控制方法
     // ==========================================
     public void SuspendByChat()
     {
@@ -97,31 +114,61 @@ public class InterventionTracker : MonoBehaviour
         // 模块 1：自适应静默检测器 (Adaptive Stall Timer)
         if (!_isBreathingActive && !_isObserving && !isSuspendedByChat)
         {
-            bool isPromptFocused = false;
-            if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articlePromptInput != null)
+            // =========================================================
+            // 【防御 1】：AI 正在请求网络生成内容，彻底锁死计时器
+            // =========================================================
+            if (isAIProcessing)
             {
-                isPromptFocused = ArticleGenerator.Instance.articlePromptInput.isFocused;
+                _idleTimer = 0f;
+                return; // 直接退出，不在等待期算发呆
             }
 
             bool isUsingIME = !string.IsNullOrEmpty(Input.compositionString);
-            // 如果这一帧有字符被正式输入到系统
             bool hasTextInput = !string.IsNullOrEmpty(Input.inputString);
 
-            // 只要有任何按键、鼠标操作、聚焦在 Prompt、或者正在用中文输入法打字，统统归零！
-            if (Input.anyKey || Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) ||
-                Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f || isPromptFocused || isUsingIME || hasTextInput)
+            // =========================================================
+            // 【防御 2】：用户主动打字 -> 立刻取消阅读缓冲，发呆清零
+            // =========================================================
+            if (Input.anyKey || isUsingIME || hasTextInput)
             {
                 _idleTimer = 0f;
+                _readingBuffer = 0f; // 用户敲击键盘，说明进入了主动输出状态，彻底结束阅读保护
             }
+            // =========================================================
+            // 【防御 3】：纯鼠标操作 (精确区分“点击”和“滚动”)
+            // =========================================================
+            else if (Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) || Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f)
+            {
+                _idleTimer = 0f;
+
+                // 核心修复：如果是鼠标“点击”（比如点在了正文区、Prompt区，改变了光标位置），也视为交互意图，结束阅读保护
+                if (Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2))
+                {
+                    _readingBuffer = 0f;
+                }
+                // 注意：如果只是单独滚动滚轮 (mouseScrollDelta)，代码不会进入这里，_readingBuffer 保持不变，允许用户安心看完长文
+            }
+            // =========================================================
+            // 【防御 4】：双手离开键盘鼠标 -> 先消耗阅读缓冲，再算发呆
+            // =========================================================
             else
             {
-                _idleTimer += Time.deltaTime;
-                bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
-                float currentThreshold = (isArticleActive ? baseArticleStall : baseCanvasStall) + currentToleranceOffset;
-
-                if (_idleTimer >= currentThreshold)
+                if (_readingBuffer > 0)
                 {
-                    TriggerProactiveBreathing();
+                    _readingBuffer -= Time.deltaTime; // 消耗阅读免打扰时间
+                    _idleTimer = 0f;                  // 发呆计时器死死按在 0
+                }
+                else
+                {
+                    // 缓冲期结束（或被点击打断后），一旦停手，正式开始算发呆
+                    _idleTimer += Time.deltaTime;
+                    bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+                    float currentThreshold = (isArticleActive ? baseArticleStall : baseCanvasStall) + currentToleranceOffset;
+
+                    if (_idleTimer >= currentThreshold)
+                    {
+                        TriggerProactiveBreathing();
+                    }
                 }
             }
         }
@@ -325,34 +372,36 @@ public class InterventionTracker : MonoBehaviour
         {
             if (_currentDataPoint.ContextArea == "Canvas")
             {
-                if (_currentDataPoint.InterventionType == "proactive_global" && (eType == "Canvas_CreateNode" || eType == "Edit_Node_Body_End"))
-                {
-                    ConcludeObservation(0.5f, "Implicit_Inspiration_Global"); return; // 画布区的隐性采纳也改为 0.5f
-                }
-
-                // =========================================================
-                // 【核心修正】：基于留存时间（Dwell Time）的删除意图分类
-                // =========================================================
                 if (eType == "Object_Delete" && log.TargetID == _trackedTargetID)
                 {
                     if (_observationTimer < 12.0f)
                     {
-                        // 存活不到 12 秒：秒删，视为干扰和拒绝
                         Debug.Log($"<color=red>[ML Tracker]</color> AI 节点存活仅 {_observationTimer:F1}s 被秒删，判定为拒绝 (Score: -1.0)。");
                         ConcludeObservation(-1.0f, "Deleted_Instantly_Rejected");
                     }
                     else
                     {
-                        // 存活超过 12 秒：已提供认知价值，阅后即焚，视为吸收
                         Debug.Log($"<color=cyan>[ML Tracker]</color> AI 节点存活 {_observationTimer:F1}s 后被删，判定为灵感吸收 (Score: +0.5)。");
                         ConcludeObservation(0.5f, "Absorbed_And_Deleted");
                     }
+                    return; // 关键修复：结束判断，防止继续往下跑！
                 }
-
-                if (eType == "Object_Delete" && log.TargetID == _trackedTargetID) ConcludeObservation(-1.0f, "Deleted_Node");
-                else if (eType == "Canvas_LinkNodes" && log.ContextInfo.Contains(_trackedTargetID)) ConcludeObservation(1.0f, "Linked_Node");
-                else if ((eType == "Edit_Node_Body_End" || eType == "Edit_Node_Title_End") && log.TargetID == _trackedTargetID) ConcludeObservation(1.5f, "Edited_Node"); // 修改节点 = 共创 1.5f
-                else if (eType == "AI_Intervention_Extended" && log.ContextInfo.Contains(_trackedTargetID)) ConcludeObservation(1.0f, "Extended_Node");
+                else if (eType == "Canvas_LinkNodes" && log.ContextInfo.Contains(_trackedTargetID))
+                {
+                    ConcludeObservation(1.0f, "Linked_Node");
+                    return;
+                }
+                else if ((eType == "Edit_Node_Body_End" || eType == "Edit_Node_Title_End") && log.TargetID == _trackedTargetID)
+                {
+                    // 用户双击修改了 AI 节点的内容，证明高度协同！
+                    ConcludeObservation(1.5f, "Edited_Node");
+                    return;
+                }
+                else if (eType == "AI_Intervention_Extended" && log.ContextInfo.Contains(_trackedTargetID))
+                {
+                    ConcludeObservation(1.0f, "Extended_Node");
+                    return;
+                }
             }
         }
     }

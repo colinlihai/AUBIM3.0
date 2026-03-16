@@ -60,7 +60,7 @@ public class NodeCardManager : MonoBehaviour
         }
 
         // ==========================================
-        // --- 7. [新增] 空格键进入编辑模式 (Space) ---
+        // --- 7. 空格键进入编辑模式 (Space) ---
         // ==========================================
         if (Input.GetKeyDown(KeyCode.Space))
         {
@@ -148,7 +148,7 @@ public class NodeCardManager : MonoBehaviour
             nc.Data.Title = rootData.rootTitle ?? "核心观点";
             nc.Data.Content = rootData.rootContent ?? "";
             nc.RefreshUI();
-            parentNode.isCognitiveNode = true;
+            parentNode.isCognitiveNode = false;
             parentNode.cognitiveType = "chat_extraction_root";
         }
         totalNodesCreated++;
@@ -188,7 +188,7 @@ public class NodeCardManager : MonoBehaviour
             nc.Data.Title = data.title ?? "细节";
             nc.Data.Content = data.content ?? "";
             nc.RefreshUI();
-            node.isCognitiveNode = true;
+            node.isCognitiveNode = false;
             node.cognitiveType = $"chat_extraction_l{depth}";
         }
 
