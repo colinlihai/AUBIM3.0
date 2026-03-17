@@ -564,6 +564,11 @@ public class NodeCardManager : MonoBehaviour
             }
         }
         _selectedNodes.Clear();
+
+        if (HasSelection() && InterventionTracker.Instance != null)
+        {
+            InterventionTracker.Instance.AbortLocalBreathing();
+        }
     }
 
     public void FocusNode(string id)
@@ -628,5 +633,10 @@ public class NodeCardManager : MonoBehaviour
             if (node != null) node.SetSelected(false);
         }
         _selectedNodes.Clear();
+
+        if (HasSelection() && InterventionTracker.Instance != null)
+        {
+            InterventionTracker.Instance.AbortLocalBreathing();
+        }
     }
 }

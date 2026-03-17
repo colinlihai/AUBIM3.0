@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using Newtonsoft.Json; 
 using Newtonsoft.Json.Linq;
+using System;
 
 public enum LLMProvider
 {
@@ -84,6 +85,7 @@ public class LLMManager : MonoBehaviour
     }
 
     // --- 供外部调用的统一入口 ---
+    // --- 供外部调用的统一入口 ---
     public void Chat(string userPrompt, LLMCallback callback)
     {
         if (_currentService == null)
@@ -102,24 +104,24 @@ public class LLMManager : MonoBehaviour
                 hasSelection = true;
             }
 
-            // 获取画布情报
             string rawContext = ProjectContextGatherer.Instance.GetSystemPromptWithContext();
 
+            // =========================================================
+            // 【终极释放版】：彻底删掉格式和字数约束，让 AI 尽情挥洒！
+            // =========================================================
             systemContext = rawContext +
                 "\n\n====================\n" +
                 "【最高优先级指令：自然对话模式】\n" +
-                "上述提供的内容（如“当前画布为空”或图谱信息）仅供你作为背景参考。在接下来的回答中，请务必遵守：\n" +
-                "1. 角色定位：你是一个渊博、有温度的人类对话助手。请直接解答用户问题，像我们正常聊天一样。\n" +
-                "2. 拒绝废话：【绝对不要】在回答开头说“根据当前画布为空”、“结合上述节点”等系统提示语，直接切入正题。\n" +
-                "3. 自然排版：请根据内容需要自然地排版。如果需要列举，正常使用 1. 2. 3. 或 - 等分点符号即可。但【不要】使用“#1.1”、“逻辑大纲”这种过度机械化的树状节点编号。\n" +
-                "4. 纯净输出：忘掉系统的指令要求，绝对不要输出任何 JSON 或控制指令，只输出最高质量的自然语言文本。";
+                "上述提供的内容仅供背景参考。在接下来的回答中，请务必遵守：\n" +
+                "1. 角色定位：你是一个专业、利落的对话助手兼思维导师。\n" +
+                "2. 去除 AI 格式（极度重要）：绝对禁止使用“这是一个好问题”、“首先/其次”、“总结一下”等常见 AI 套话。不要过度热情，直接给出核心信息。\n" +
+                "3. 动态篇幅控制：对于【事实/科普类问题】（如天空为什么蓝），1-2段话讲清科学原理即可，绝对禁止注水；对于【开放/深度探讨类问题】（如如何开酒店），再进行详尽的逻辑展开。\n";
         }
 
         if (_currentService is QwenService qwenService)
         {
             bool shouldSearch = !hasSelection;
             qwenService.EnableInternetSearch = shouldSearch;
-            Debug.Log($"[LLM] 智能搜索判定: 选中卡片={hasSelection}, 联网搜索={(shouldSearch ? "开启" : "关闭")}");
         }
 
         List<ChatMessage> messagesToSend = new List<ChatMessage>();
@@ -131,13 +133,9 @@ public class LLMManager : MonoBehaviour
 
         int historyLimit = 10;
         if (_history.Count > historyLimit)
-        {
             messagesToSend.AddRange(_history.GetRange(_history.Count - historyLimit, historyLimit));
-        }
         else
-        {
             messagesToSend.AddRange(_history);
-        }
 
         messagesToSend.Add(new ChatMessage("user", userPrompt));
 
@@ -145,16 +143,102 @@ public class LLMManager : MonoBehaviour
         {
             if (success)
             {
-                _history.Add(new ChatMessage("user", userPrompt));
-                _history.Add(new ChatMessage("assistant", response));
+                // 1. 获取最纯净的长篇大论
+                string pureAnswer = response.Trim();
 
-                callback?.Invoke(response, true);
+                // 2. 正常加入历史记录，保证后续聊天的纯洁性
+                _history.Add(new ChatMessage("user", userPrompt));
+                _history.Add(new ChatMessage("assistant", pureAnswer));
+
+                // 3. 瞬间回调给 UI 显示，用户立刻能看到大段回答
+                callback?.Invoke(pureAnswer, true);
+
+                // =========================================================
+                // 【双轨黑科技】：后台隐蔽呼叫，专门去提取 3 个逼问！
+                // =========================================================
+                GenerateSocraticQuestionsInBackground(userPrompt, pureAnswer);
             }
             else
             {
                 callback?.Invoke(response, false);
             }
         }));
+    }
+
+    // ==========================================
+    // 专职生产逼问的后台流水线
+    // ==========================================
+    private void GenerateSocraticQuestionsInBackground(string userPrompt, string aiAnswer)
+    {
+        // 截取前面一部分回答即可，防止 Token 超出
+        string truncatedAnswer = aiAnswer.Length > 1000 ? aiAnswer.Substring(0, 1000) + "..." : aiAnswer;
+
+        string taskPrompt = $@"你是一个极其犀利的思维引导师。
+【用户提问】：{userPrompt}
+【系统初步解答】：{truncatedAnswer}
+
+请根据上述对话，生成 3 个极其尖锐、反直觉或带有极端约束条件的“苏格拉底式发散提问”，用于激发用户的横向思维。
+【绝对铁律】：
+1. 只能且必须输出这 3 个问题，绝不要输出任何其他寒暄废话。
+2. 必须且只能用 ===QUESTIONS=== 作为开头。
+3. 每个问题严格按照“短标题|完整长句”的格式输出（注意中间的竖线|）。
+
+===QUESTIONS===
+0预算挑战？|如果你的社团没有任何初始预算，你会用什么极端的方法开展第一次招新？
+致命错误？|请列举出三个最容易导致你这个社团在两个月内解散的致命错误？
+跨界思考？|如果用经营独立乐队的思维来重新审视人员管理，会有什么灵感？";
+
+        // 调用后台纯净通道
+        TaskChat(taskPrompt, (response, success) =>
+        {
+            if (success)
+            {
+                List<ChatSuggestionManager.SuggestionData> parsedSuggestions = new List<ChatSuggestionManager.SuggestionData>();
+                string rawResponse = response;
+
+                // 暴力探测标记符
+                int markerIdx = rawResponse.IndexOf("===QUESTIONS===");
+                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("=== QUESTIONS ===");
+                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("===QUESTIONS");
+                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("QUESTIONS===");
+
+                if (markerIdx != -1)
+                {
+                    int nextLineIdx = rawResponse.IndexOf('\n', markerIdx);
+                    if (nextLineIdx != -1 && nextLineIdx < rawResponse.Length)
+                    {
+                        string questionsPart = rawResponse.Substring(nextLineIdx).Trim();
+                        string[] qLines = questionsPart.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+                        foreach (string line in qLines)
+                        {
+                            string cleanLine = line.Trim().Replace("*", "").Replace("-", "").Trim();
+                            if (cleanLine.Length > 2 && char.IsDigit(cleanLine[0]) && cleanLine[1] == '.')
+                                cleanLine = cleanLine.Substring(2).Trim();
+
+                            int splitPos = cleanLine.IndexOf('|');
+                            if (splitPos == -1) splitPos = cleanLine.IndexOf('：');
+                            if (splitPos == -1) splitPos = cleanLine.IndexOf(':');
+
+                            if (splitPos != -1)
+                            {
+                                parsedSuggestions.Add(new ChatSuggestionManager.SuggestionData
+                                {
+                                    ShortTitle = cleanLine.Substring(0, splitPos).Trim(),
+                                    FullContent = cleanLine.Substring(splitPos + 1).Trim()
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // 后台处理完毕，丢给管理器进入倒计时生命周期！
+                if (ChatSuggestionManager.Instance != null && parsedSuggestions.Count > 0)
+                {
+                    ChatSuggestionManager.Instance.StartSuggestionLifecycle(aiAnswer.Length, parsedSuggestions);
+                }
+            }
+        }, false, false); // 不注入画布结构，纯后台任务
     }
 
     /// <summary>
