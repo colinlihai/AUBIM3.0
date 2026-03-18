@@ -63,6 +63,7 @@ public class InterventionTracker : MonoBehaviour
     public bool isSuspendedByChat = false;
     public bool isAIProcessing = false;
     private float _readingBuffer = 0f;
+    private bool _isAwaitingUserAction = false;
 
     private float _idleTimer = 0f;
     private bool _isBreathingActive = false;
@@ -173,6 +174,12 @@ public class InterventionTracker : MonoBehaviour
                 return;
             }
 
+            if (_isAwaitingUserAction)
+            {
+                _idleTimer = 0f;
+                return;
+            }
+
             bool isUsingIME = !string.IsNullOrEmpty(Input.compositionString);
             bool hasTextInput = !string.IsNullOrEmpty(Input.inputString);
 
@@ -198,6 +205,15 @@ public class InterventionTracker : MonoBehaviour
                 }
                 else
                 {
+                    bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+                    int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
+                    int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
+                    if (!isArticleActive && selectedNodes == 0 && totalNodes <= 5)
+                    {
+                        _idleTimer = 0f;
+                        return;
+                    }
+
                     _idleTimer += Time.deltaTime;
 
                     InterventionType bestType = GetBestPredictedType(out string contextStr, out bool isGlobal, out string recordKey);
@@ -219,7 +235,7 @@ public class InterventionTracker : MonoBehaviour
             _observationTimer += Time.deltaTime;
             if (_observationTimer >= observationWindow)
             {
-                ConcludeObservation(0f, "Timeout_Ignored");
+                ConcludeObservation(-0.2f, "Timeout_Ignored");
             }
         }
     }
@@ -358,17 +374,17 @@ public class InterventionTracker : MonoBehaviour
     // 【终极闭环：5 级反馈矩阵 + 专属权重存储】
     // =========================================================
 
-    /// <summary>
-    /// 等级 1：显性拒绝 (强负向 -1.0)
-    /// </summary>
     public void OnInterventionRejected(string forcedKey = "")
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
+        key = NormalizeMLKey(key); // 规范化
 
-        UpdateProfileRecord(key, -1.0f, +5f);
-        Debug.Log($"<color=red>[ML]</color> {key} 遭显性拒绝 (-1.0分)。该动作退后延时。");
+        if (string.IsNullOrEmpty(key)) return; // 拦截幽灵数据
+
+        UpdateProfileRecord(key, -1.0f, +10f); // 假设我们上一版改成了 10f
+        Debug.Log($"<color=red>[ML]</color> {key} 遭显性拒绝 (-1.0分)。");
         RecordSingleMLData(key, -1.0f, "Explicit_Reject");
     }
 
@@ -377,40 +393,43 @@ public class InterventionTracker : MonoBehaviour
         _isBreathingActive = false;
         _idleTimer = 0f;
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
+        key = NormalizeMLKey(key);
 
-        UpdateProfileRecord(key, -0.2f, +1f);
-        Debug.Log($"<color=yellow>[ML]</color> {key} 被搁置 (-0.2分)。该动作小幅退后。");
+        if (string.IsNullOrEmpty(key)) return;
+
+        UpdateProfileRecord(key, -0.2f, +3f);
+        Debug.Log($"<color=yellow>[ML]</color> {key} 被搁置 (-0.2分)。");
         RecordSingleMLData(key, -0.2f, "Ignored_Timeout_Or_Overwritten");
     }
 
-    /// <summary>
-    /// 等级 3：隐性采纳 (弱正向 +0.5)
-    /// </summary>
     public void OnImplicitScaffoldAccepted(string forcedKey = "")
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
+        key = NormalizeMLKey(key);
+
+        if (string.IsNullOrEmpty(key)) return;
 
         UpdateProfileRecord(key, 0.5f, -1.5f);
-        Debug.Log($"<color=magenta>[ML]</color> {key} 获隐性采纳 (+0.5分)！该动作更自信。");
+        Debug.Log($"<color=magenta>[ML]</color> {key} 获隐性采纳 (+0.5分)！");
         RecordSingleMLData(key, 0.5f, "Implicit_Scaffold_Accepted");
-        _lastPredictedRecordKey = ""; // 结算完清空
+        _lastPredictedRecordKey = "";
     }
 
-    /// <summary>
-    /// 等级 5：协作共创 (超强正向 +1.5)
-    /// </summary>
     public void OnCoCreationAccepted(string forcedKey = "")
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
+        key = NormalizeMLKey(key);
+
+        if (string.IsNullOrEmpty(key)) return;
 
         UpdateProfileRecord(key, 1.5f, -5f);
-        Debug.Log($"<color=cyan>[ML]</color> {key} 达成深度共创 (+1.5分)！该动作无条件信任。");
+        Debug.Log($"<color=cyan>[ML]</color> {key} 达成深度共创 (+1.5分)！");
         RecordSingleMLData(key, 1.5f, "Co_Creation");
-        _lastPredictedRecordKey = ""; // 结算完清空
+        _lastPredictedRecordKey = "";
     }
 
     public void OnButtonClicked(string clickedTypeString)
@@ -418,13 +437,38 @@ public class InterventionTracker : MonoBehaviour
         _isBreathingActive = false;
         _idleTimer = 0f;
 
-        // 如果外部传了明确的名字，就尽量结合判断，否则用最后预测的
-        string key = _lastPredictedRecordKey;
+        // 【核心修复 1】：终于开始采用传进来的 clickedTypeString 了！
+        string key = string.IsNullOrEmpty(clickedTypeString) ? _lastPredictedRecordKey : clickedTypeString;
+        key = NormalizeMLKey(key);
+
+        if (string.IsNullOrEmpty(key))
+        {
+            Debug.LogWarning("<color=red>[ML Tracker]</color> 警告：试图记录一个空的显性采纳！已拦截。");
+            return;
+        }
 
         UpdateProfileRecord(key, 1.0f, -3f);
-        Debug.Log($"<color=green>[ML]</color> {key} 获显性采纳 (+1.0分)！该动作极其自信。");
+        Debug.Log($"<color=green>[ML]</color> {key} 获显性采纳 (+1.0分)！");
         RecordSingleMLData(key, 1.0f, "Explicit_Adopt");
         _lastPredictedRecordKey = "";
+    }
+
+    /// <summary>
+    /// 细分等级：认知抢答/提前输入 (微小正向 +0.2，减少容忍度)
+    /// 用户在气泡弹出来之前就已经开始打字了，说明其思维敏捷或阅读速度快。
+    /// </summary>
+    public void OnPreemptiveTyping(string forcedKey = "")
+    {
+        string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
+        key = NormalizeMLKey(key);
+
+        if (string.IsNullOrEmpty(key)) return;
+
+        // 核心：步长设定为 -1.0f。每次抢答，下一次的专属等待时间就会缩短 1 秒！
+        UpdateProfileRecord(key, 0.2f, -1.0f);
+
+        Debug.Log($"<color=cyan>[ML]</color> {key} 被用户提前抢答 (+0.2分)！降低容忍度使其下次更快出现 (-1.0s)。");
+        RecordSingleMLData(key, 0.2f, "Preemptive_Typing");
     }
 
     // ==========================================
@@ -462,7 +506,7 @@ public class InterventionTracker : MonoBehaviour
         catch (Exception e) { Debug.LogError($"[User Profile] 保存档案失败: {e.Message}"); }
     }
 
-    private float GetToleranceOffset(string categoryName)
+    public float GetToleranceOffset(string categoryName)
     {
         if (_userProfile == null) return 0f;
         var record = _userProfile.actionRecords.Find(r => r.categoryName == categoryName);
@@ -495,6 +539,15 @@ public class InterventionTracker : MonoBehaviour
     {
         string eType = log.EventType;
         _idleTimer = 0f;
+
+        if (eType.StartsWith("Canvas_") || eType.StartsWith("Article_") || eType.StartsWith("Edit_") || eType.StartsWith("Node_") || eType.StartsWith("Object_"))
+        {
+            if (_isAwaitingUserAction)
+            {
+                Debug.Log("<color=green>[Tracker 解锁]</color> 侦测到用户新动作，解除防挂机锁，重启 AI 观察期！");
+                _isAwaitingUserAction = false;
+            }
+        }
 
         if (isSuspendedByChat && (eType.StartsWith("Canvas_") || eType.StartsWith("Article_") || eType.StartsWith("Edit_") || eType.StartsWith("Node_") || eType.StartsWith("Object_")))
         {
@@ -558,14 +611,16 @@ public class InterventionTracker : MonoBehaviour
         int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
         int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
 
+        string normalizedKey = NormalizeMLKey(log.ContextInfo);
+
         _currentDataPoint = new MLDataPoint
         {
-            InterventionType = log.ContextInfo, // 对应传进来的 Type
+            InterventionType = normalizedKey,
             ContextArea = "Canvas",
             CanvasNodeCount = totalNodes,
             SelectedNodeCount = selectedNodes,
             LastArticleAction = CurrentArticleAction,
-            ToleranceOffset = GetToleranceOffset(_lastPredictedRecordKey), // 提取此时这块牌的偏移量
+            ToleranceOffset = GetToleranceOffset(normalizedKey), // 提取此时这块牌的偏移量
             Timestamp = DateTime.Now.ToString("MM-dd HH:mm:ss")
         };
     }
@@ -637,6 +692,38 @@ public class InterventionTracker : MonoBehaviour
         _isBreathingActive = false;
         _idleTimer = 0f;
 
+        _isAwaitingUserAction = true;
+
         OnInterventionIgnored(_lastPredictedRecordKey);
+    }
+
+    // =========================================================
+    // 【核心修复 2：数据规范化漏斗】解决键值分裂与大小写不一致
+    // =========================================================
+    private string NormalizeMLKey(string rawKey)
+    {
+        if (string.IsNullOrEmpty(rawKey)) return "";
+        string lower = rawKey.ToLower();
+
+        // 聊天区
+        if (lower.Contains("chat") || lower.Contains("chip")) return "chat_socratic_chip";
+
+        // 成文区 (4 Stage)
+        if (lower.Contains("coldstart") || lower.Contains("stage0")) return "article_coldstart";
+        if (lower.Contains("expand")) return "article_expand";
+        if (lower.Contains("stitch")) return "article_stitch";
+        if (lower.Contains("reflect")) return "article_reflect";
+
+        // 画布区 (4 Proactive)
+        if (lower.Contains("socratic")) return "proactive_socratic";
+        if (lower.Contains("counter")) return "proactive_counter";
+        if (lower.Contains("elaborate")) return "proactive_elaborate";
+        if (lower.Contains("global")) return "proactive_global";
+
+        // 兜底防线：如果UI传了类似 "ManualTriggered"
+        if (lower.Contains("manual")) return "proactive_global";
+
+        // 极致兜底
+        return lower;
     }
 }

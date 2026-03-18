@@ -32,9 +32,27 @@ public class ChatSuggestionChip : MonoBehaviour, IPointerEnterHandler, IPointerE
 
     public void OnPointerEnter(PointerEventData eventData)
     {
-        // 悬停：变为不透明，并显示完整句子
+        // 1. 视觉提亮
         canvasGroup.alpha = 1f;
-        if (textComponent != null) textComponent.text = _fullContent;
+
+        // =========================================================
+        // 【交互引导 1：富文本微暗示】
+        // 在长句子的末尾，无缝拼接一个带有颜色、斜体、略小字号的行动号召 (CTA)
+        // 使用 TextMeshPro 的富文本标签，无需增加任何额外 UI 节点！
+        // =========================================================
+        if (textComponent != null)
+        {
+            string callToAction = " <color=#FFD700><i>[点击填入]</i></size></color>";
+            textComponent.text = _fullContent + callToAction;
+        }
+
+        // =========================================================
+        // 【交互引导 2：物理反馈微动效】
+        // 让气泡极其轻微地放大 2%，产生一种“被激活”、“浮起来”的按钮质感
+        // =========================================================
+        transform.localScale = new Vector3(1.02f, 1.02f, 1.02f);
+
+        // 通知管理器锁定计时
         if (ChatSuggestionManager.Instance != null)
         {
             ChatSuggestionManager.Instance.SetHoverState(true);
@@ -43,9 +61,14 @@ public class ChatSuggestionChip : MonoBehaviour, IPointerEnterHandler, IPointerE
 
     public void OnPointerExit(PointerEventData eventData)
     {
-        // 离开：恢复半透明，显示简短标题
-        canvasGroup.alpha = 0.8f; // 设定的半透明值
+        // 1. 恢复半透明与短标题
+        canvasGroup.alpha = 0.8f;
         if (textComponent != null) textComponent.text = _shortTitle;
+
+        // 2. 恢复原始大小
+        transform.localScale = Vector3.one;
+
+        // 通知管理器恢复计时
         if (ChatSuggestionManager.Instance != null)
         {
             ChatSuggestionManager.Instance.SetHoverState(false);

@@ -37,7 +37,13 @@ public class ArticleGenerator : MonoBehaviour
 
     [HideInInspector]
     public int lastKnownCaretPosition = 0;
+
+    private int _cachedSelectionStart = 0;
+    private int _cachedSelectionEnd = 0;
+
     private bool _wasPromptFocused = false;
+    private string _lastPreviewedText = "";
+    private string _previewPlaceholder = "(请在上方输入您的润色指令并点击生成...)";
 
     private ArticlePromptController _promptController;
     private ArticleTextObserver _textObserver;
@@ -73,15 +79,14 @@ public class ArticleGenerator : MonoBehaviour
             if (mainBodyInput != null && mainBodyInput.isFocused)
             {
                 lastKnownCaretPosition = mainBodyInput.selectionFocusPosition;
+                _cachedSelectionStart = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
+                _cachedSelectionEnd = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
             }
 
-            // ==========================================
-            // 侦测 Prompt 输入框的“点击进入”事件
-            // ==========================================
+            // 【恢复焦点侦测】：找回提示预览功能
             bool isPromptFocused = (articlePromptInput != null && articlePromptInput.isFocused) ||
                                    (promptInput != null && promptInput.isFocused);
 
-            // 当焦点刚刚进入 Prompt 框的这一帧
             if (isPromptFocused && !_wasPromptFocused)
             {
                 OnPromptGainedFocus();
@@ -94,21 +99,34 @@ public class ArticleGenerator : MonoBehaviour
     {
         if (mainBodyInput == null || aiSuggestionInput == null) return;
 
-        int startIdx = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
-        int endIdx = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
+        int startIdx = _cachedSelectionStart;
+        int endIdx = _cachedSelectionEnd;
 
-        // 只有当确实有高亮选中文本时，才执行复制
         if (endIdx > startIdx)
         {
             string selectedText = mainBodyInput.text.Substring(startIdx, endIdx - startIdx);
 
-            // 用双引号括起来，投射到 AI 生成区
-            aiSuggestionInput.text = $"【已锁定待润色段落】\n\"{selectedText}\"\n\n(请在上方输入您的润色指令...)";
+            // 防抖：如果刚刚已经预览过了，就不重复追加
+            if (selectedText == _lastPreviewedText) return;
+            _lastPreviewedText = selectedText;
+
+            string currentText = aiSuggestionInput.text;
+
+            // 如果用户点了一次没生成，又去点了别的，把之前的提示改为“已取消”，保持历史干净
+            if (currentText.Contains(_previewPlaceholder))
+            {
+                currentText = currentText.Replace(_previewPlaceholder, "(已取消润色，等待新指令)");
+            }
+
+            string divider = string.IsNullOrWhiteSpace(currentText) ? "" : "\n\n-------\n\n";
+            aiSuggestionInput.text = currentText + divider + $"【已锁定待润色段落】\n\"{selectedText}\"\n\n{_previewPlaceholder}";
+
+            StartCoroutine(ScrollToBottom(aiSuggestionInput));
         }
     }
 
     // ==========================================
-    // 供外部访问的代理接口 (保证向下兼容)
+    // 供外部访问的代理接口
     // ==========================================
     public void StartPromptBreathing(string interventionType, string suggestedText, float duration = 60f)
     {
@@ -132,74 +150,44 @@ public class ArticleGenerator : MonoBehaviour
     {
         if (regenerateBtnText == null) return;
 
-        // ==========================================
-        // 1. 最高优先级：判断当前是否有 AI 主动介入正在等待被采纳
-        // ==========================================
         bool isHandlingProactiveIntervention = _promptController != null && !string.IsNullOrEmpty(_promptController.CurrentPromptInterventionType);
 
         if (isHandlingProactiveIntervention)
         {
-            // 只有当真正的金色/灰色 AI 呼吸占位符存在时，才显示“采纳建议”
             regenerateBtnText.text = "采纳建议";
             return;
         }
 
-        // ==========================================
-        // 2. 如果没有主动介入，则进入手动模式的四向路由 UI 匹配
-        // ==========================================
-        bool hasTextSelection = false;
-        if (mainBodyInput != null)
-        {
-            hasTextSelection = Mathf.Abs(mainBodyInput.selectionAnchorPosition - mainBodyInput.selectionFocusPosition) > 0;
-        }
-
+        // 使用安全的选区缓存来判断是否有选中文本
+        bool hasTextSelection = (_cachedSelectionEnd > _cachedSelectionStart);
         bool hasNodeSelection = NodeCardManager.Instance != null && NodeCardManager.Instance.HasSelection();
         bool isBodyEmpty = mainBodyInput == null || string.IsNullOrWhiteSpace(mainBodyInput.text);
 
-        // 严格对应我们的路由逻辑 A, B, C, D
-        if (hasTextSelection)
-        {
-            regenerateBtnText.text = "局部润色";    // 路由 A：选中了正文
-        }
-        else if (hasNodeSelection)
-        {
-            regenerateBtnText.text = "节点生成";    // 路由 B：选中了思维导图节点
-        }
-        else if (isBodyEmpty)
-        {
-            regenerateBtnText.text = "全局生成";    // 路由 C：正文为空，结合全节点从零写起
-        }
-        else
-        {
-            regenerateBtnText.text = "全文优化";    // 路由 D：正文有字，没选正文也没选节点，针对全文提要求
-        }
+        if (hasTextSelection) regenerateBtnText.text = "局部润色";
+        else if (hasNodeSelection) regenerateBtnText.text = "节点生成";
+        else if (isBodyEmpty) regenerateBtnText.text = "全局生成";
+        else regenerateBtnText.text = "全文优化";
     }
 
     public void OnRegenerateClicked()
     {
         bool isHandlingProactiveIntervention = _promptController != null && !string.IsNullOrEmpty(_promptController.CurrentPromptInterventionType);
-
-        // 记录一下 AI 刚才介入的类型，用来指引后面的路由
         string previousInterventionType = "";
 
         if (isHandlingProactiveIntervention)
         {
             previousInterventionType = _promptController.CurrentPromptInterventionType;
-
-            // 结算这次 AI 介入（停止闪烁金光等视觉效果）
             _promptController.SettlePromptIntention();
 
             if (UserBehaviorSystem.Instance != null)
                 UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ProactiveAccepted", 1);
-
         }
 
-        // 2. 读取指令并清空输入框
         string userInstruction = "";
         if (articlePromptInput != null && !string.IsNullOrWhiteSpace(articlePromptInput.text))
         {
             userInstruction = articlePromptInput.text;
-            articlePromptInput.text = ""; // 采纳并执行后，清空框，显得非常干净
+            articlePromptInput.text = "";
         }
         else if (promptInput != null && !string.IsNullOrWhiteSpace(promptInput.text))
         {
@@ -209,15 +197,13 @@ public class ArticleGenerator : MonoBehaviour
 
         if (mainBodyInput == null || aiSuggestionInput == null) return;
 
-        int startIdx = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
-        int endIdx = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
+        // 读取安全的选区缓存，而不是去拿可能已经失焦清零的输入框状态
+        int startIdx = _cachedSelectionStart;
+        int endIdx = _cachedSelectionEnd;
         bool hasTextSelection = (endIdx > startIdx);
+
         bool hasNodeSelection = NodeCardManager.Instance != null && NodeCardManager.Instance.HasSelection();
         bool isBodyEmpty = string.IsNullOrWhiteSpace(mainBodyInput.text);
-
-        // ==========================================
-        // 终极精准路由树：区分 5 种意图
-        // ==========================================
 
         // 路由 A：局部润色 (选中了正文)
         if (hasTextSelection)
@@ -230,6 +216,10 @@ public class ArticleGenerator : MonoBehaviour
             int contextStart = Mathf.Max(0, startIdx - 500);
             int contextEnd = Mathf.Min(fullText.Length, endIdx + 500);
 
+            // 执行后立刻清空选区缓存，防止下次误触发
+            _cachedSelectionStart = 0;
+            _cachedSelectionEnd = 0;
+            _lastPreviewedText = "";
             StartCoroutine(HandleLocalRefinement(selectedText, fullText.Substring(contextStart, startIdx - contextStart), fullText.Substring(endIdx, contextEnd - endIdx), userInstruction));
         }
 
@@ -250,10 +240,8 @@ public class ArticleGenerator : MonoBehaviour
         }
 
         // 路由 E：顺势续写 
-        // 【核心修复】：如果 AI 刚才的介入类型是 ArticleGap（代表填补空缺/顺势推进），
-        // 或者用户什么都没选且光标在末尾，就强制走顺势续写，绝不去重写全文！
         else if (previousInterventionType == InterventionType.ArticleGap.ToString() ||
-                (!hasTextSelection && mainBodyInput.selectionFocusPosition >= mainBodyInput.text.Length - 10 && string.IsNullOrWhiteSpace(userInstruction)))
+                (!hasTextSelection && lastKnownCaretPosition >= mainBodyInput.text.Length - 10 && string.IsNullOrWhiteSpace(userInstruction)))
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Adopt_AI, "ArticleModal", "ContextualExpand", 1);
             if (string.IsNullOrWhiteSpace(userInstruction)) userInstruction = "请顺着前文的逻辑，自然地续写接下来的 1-2 个段落。";
@@ -265,7 +253,7 @@ public class ArticleGenerator : MonoBehaviour
             StartCoroutine(HandleContextualExpansion(tailContext, userInstruction));
         }
 
-        // 路由 D：宏观调整/全局审视 (正文有字，且不需要续写，比如 AI 的介入类型是 ArticleReflect 全局反思)
+        // 路由 D：宏观调整/全局审视
         else
         {
             if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Global, "ArticleModal", "GlobalGenerate_RefineAll", 1);
@@ -281,32 +269,35 @@ public class ArticleGenerator : MonoBehaviour
 【当前文章全文】(绝不要直接重复原文，只输出基于指令的修改结果或建议)：
 {currentFullText}";
 
-            aiSuggestionInput.text = "AI 正在纵览全文并根据您的指令进行重构，请稍候...";
+            string history = aiSuggestionInput.text;
+            string divider = string.IsNullOrWhiteSpace(history) ? "" : "\n\n-------\n\n";
+            aiSuggestionInput.text = history + divider + "[ AI 正在纵览全文并根据您的指令进行重构，请稍候... ]";
+            StartCoroutine(ScrollToBottom(aiSuggestionInput));
 
-            // 上锁免打扰
             if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
 
             if (LLMManager.Instance != null)
             {
                 LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
                 {
-                    // 解锁并给缓冲
                     if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
 
                     if (success)
                     {
                         string cleanRes = FormatChineseArticle(response);
-                        aiSuggestionInput.text = cleanRes;
+                        aiSuggestionInput.text = history + divider + cleanRes;
                         if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
                     }
-                    else aiSuggestionInput.text = "生成失败: " + response;
+                    else aiSuggestionInput.text = history + divider + "[ 生成失败: " + response + " ]";
+
+                    StartCoroutine(ScrollToBottom(aiSuggestionInput));
                 });
             }
         }
     }
 
     // ==========================================
-    // 大模型 LLM 请求协程 (保持原本的优秀 Prompt 不变)
+    // 大模型 LLM 请求协程 
     // ==========================================
     private IEnumerator HandleFullGeneration(string instruction)
     {
@@ -323,7 +314,10 @@ public class ArticleGenerator : MonoBehaviour
 【导图素材结构内容】：
 {rawContextData}";
 
-        aiSuggestionInput.text = "AI 正在撰写内容，请稍候...";
+        string history = aiSuggestionInput.text;
+        string divider = string.IsNullOrWhiteSpace(history) ? "" : "\n\n-------\n\n";
+        aiSuggestionInput.text = history + divider + "[  AI 正在撰写内容，请稍候... ]";
+        StartCoroutine(ScrollToBottom(aiSuggestionInput));
 
         if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
 
@@ -336,11 +330,12 @@ public class ArticleGenerator : MonoBehaviour
 
                 if (success)
                 {
-                    aiSuggestionInput.text = FormatChineseArticle(response);
-                    // 【新增】：按字数发放大礼包，1000字就给 100 秒阅读免打扰
+                    aiSuggestionInput.text = history + divider + FormatChineseArticle(response);
                     if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(response.Length);
                 }
-                else aiSuggestionInput.text = "生成失败，请重试。\n错误信息: " + response;
+                else aiSuggestionInput.text = history + divider + "[ 生成失败，请重试。\n错误信息: " + response + " ]";
+
+                StartCoroutine(ScrollToBottom(aiSuggestionInput));
                 finished = true;
             });
             while (!finished) yield return null;
@@ -359,12 +354,24 @@ public class ArticleGenerator : MonoBehaviour
 {instruction}
 【规则】：只输出处理后的正文，不要重复原文，不带废话标签。";
 
-        // ==========================================
-        // 【核心修改】：视觉回显排版，保留原文，在下方追加
-        // ==========================================
         string displayPrefix = $"【已锁定待润色段落】\n\"{selectedText}\"\n\n";
+        string loadingText = "[ AI 正在思考并深度重构选中段落，请稍候... ]";
 
-        aiSuggestionInput.text = displayPrefix + "AI 正在思考并深度重构选中段落，请稍候...";
+        // 【核心体验升级：无缝替换】
+        string currentText = aiSuggestionInput.text;
+        if (currentText.Contains(_previewPlaceholder))
+        {
+            // 如果刚才预览了占位符，直接把占位符替换成 Loading，丝般顺滑！
+            aiSuggestionInput.text = currentText.Replace(_previewPlaceholder, loadingText);
+        }
+        else
+        {
+            // 如果用户手速极快没触发预览直接点生成，走标准追加流程
+            string divider = string.IsNullOrWhiteSpace(currentText) ? "" : "\n\n-------\n\n";
+            aiSuggestionInput.text = currentText + divider + displayPrefix + loadingText;
+        }
+
+        StartCoroutine(ScrollToBottom(aiSuggestionInput));
 
         if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
 
@@ -378,15 +385,16 @@ public class ArticleGenerator : MonoBehaviour
                 if (success)
                 {
                     string cleanRes = FormatChineseArticle(response.Replace("处理后：", "").Replace("【选中文本】", "").Trim());
-                    // 成功后，将润色结果直接接在原文的下方展示
-                    aiSuggestionInput.text = displayPrefix + $"【润色结果】\n{cleanRes}";
-
+                    // 【精确替换 Loading，不破坏任何历史记录】
+                    aiSuggestionInput.text = aiSuggestionInput.text.Replace(loadingText, $"【润色结果】\n{cleanRes}");
                     if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
                 }
                 else
                 {
-                    aiSuggestionInput.text = displayPrefix + "生成失败: " + response;
+                    aiSuggestionInput.text = aiSuggestionInput.text.Replace(loadingText, $"[ 生成失败: {response} ]");
                 }
+
+                StartCoroutine(ScrollToBottom(aiSuggestionInput));
                 finished = true;
             });
             while (!finished) yield return null;
@@ -402,7 +410,10 @@ public class ArticleGenerator : MonoBehaviour
 {instruction}
 【规则】：严格顺着指令撰写接下来的1-2个新段落，无缝衔接前文，不带废话。";
 
-        aiSuggestionInput.text = "AI 正在结合前文，为您构思接下来的内容...";
+        string history = aiSuggestionInput.text;
+        string divider = string.IsNullOrWhiteSpace(history) ? "" : "\n\n-------\n\n";
+        aiSuggestionInput.text = history + divider + "[ AI 正在结合前文，为您构思接下来的内容... ]";
+        StartCoroutine(ScrollToBottom(aiSuggestionInput));
 
         if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(true);
 
@@ -416,12 +427,12 @@ public class ArticleGenerator : MonoBehaviour
                 if (success)
                 {
                     string cleanRes = FormatChineseArticle(response.Replace("续写如下：", "").Trim());
-                    aiSuggestionInput.text = cleanRes;
-
-                    // 发放阅读缓冲
+                    aiSuggestionInput.text = history + divider + cleanRes;
                     if (InterventionTracker.Instance != null) InterventionTracker.Instance.GrantReadingBuffer(cleanRes.Length);
                 }
-                else aiSuggestionInput.text = "生成失败: " + response;
+                else aiSuggestionInput.text = history + divider + "[ 生成失败: " + response + " ]";
+
+                StartCoroutine(ScrollToBottom(aiSuggestionInput));
                 finished = true;
             });
             while (!finished) yield return null;
@@ -442,7 +453,6 @@ public class ArticleGenerator : MonoBehaviour
 
         try
         {
-            // 1. 获取目标文件夹路径
             string targetFolder;
             if (ExperimentManager.Instance != null && !string.IsNullOrWhiteSpace(ExperimentManager.Instance.currentSubjectID))
             {
@@ -454,19 +464,14 @@ public class ArticleGenerator : MonoBehaviour
                 targetFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "AUBIM_文章导出");
             }
 
-            if (!Directory.Exists(targetFolder))
-            {
-                Directory.CreateDirectory(targetFolder);
-            }
+            if (!Directory.Exists(targetFolder)) Directory.CreateDirectory(targetFolder);
 
-            // 2. 获取当前项目名称作为文件名
             string projectName = "未命名项目";
             if (SaveSystem.Instance != null && !string.IsNullOrWhiteSpace(SaveSystem.Instance.currentSaveName))
             {
                 projectName = SaveSystem.Instance.currentSaveName;
             }
 
-            // 【防爆设计】：过滤掉项目名中可能包含的非法路径字符 (如 \ / : * ? " < > |)
             foreach (char c in Path.GetInvalidFileNameChars())
             {
                 projectName = projectName.Replace(c.ToString(), "");
@@ -475,24 +480,18 @@ public class ArticleGenerator : MonoBehaviour
             string fileName = $"{projectName}.txt";
             string fullPath = Path.Combine(targetFolder, fileName);
 
-            // 3. 将正文内容以 UTF-8 编码写入 TXT 文件
-            // 注：File.WriteAllText 默认行为就是“如果文件存在，则完全覆盖它”，完美契合需求
             File.WriteAllText(fullPath, mainBodyInput.text, Encoding.UTF8);
 
-            // 4. 视觉与日志反馈
-            if (ToastSystem.Instance != null)
-                ToastSystem.Instance.Show($"已保存至: {fileName}");
-
+            if (ToastSystem.Instance != null) ToastSystem.Instance.Show($"已保存至: {fileName}");
             Debug.Log($"<color=green>[导出成功]</color> 文章已覆盖归档至: {fullPath}");
         }
         catch (Exception e)
         {
-            if (ToastSystem.Instance != null)
-                ToastSystem.Instance.Show("导出失败，请查看控制台日志");
-
+            if (ToastSystem.Instance != null) ToastSystem.Instance.Show("导出失败，请查看控制台日志");
             Debug.LogError($"[导出失败] 无法导出 TXT 文件: {e.Message}");
         }
     }
+
     public void ClearAISuggestion() { if (aiSuggestionInput != null) aiSuggestionInput.text = ""; }
 
     public void OnOpenModal()
@@ -551,7 +550,6 @@ public class ArticleGenerator : MonoBehaviour
             if (cleanLine.StartsWith("- ")) cleanLine = cleanLine.Substring(2).Trim();
             if (!string.IsNullOrWhiteSpace(cleanLine))
             {
-                // 我们手动 Append("\n")，强制系统使用 Unix 风格的纯净换行符
                 string formattedLine = line.Trim().StartsWith("#") ? cleanLine : "    " + cleanLine;
                 sb.Append(formattedLine).Append("\n");
             }
@@ -560,19 +558,15 @@ public class ArticleGenerator : MonoBehaviour
     }
 
     // ==========================================
-    // 拖拽生成核心黑科技：空间坐标 -> 字符串索引
+    // 拖拽生成核心
     // ==========================================
     public void HandleNodeDropped(Vector2 screenPos, Camera cam, BaseNodeController node)
     {
         if (mainBodyInput == null || node == null || node.Data == null) return;
 
-        // 1. 提取 TextMeshPro 核心文本组件
         TMP_Text textComp = mainBodyInput.textComponent;
-
-        // 2. 【核心黑科技】：根据屏幕鼠标坐标，反推最近的字符索引
         int insertIndex = TMP_TextUtilities.GetCursorIndexFromPosition(textComp, screenPos, cam);
 
-        // 如果用户拖到了输入框的空白处（文本末尾之后），API 会返回 -1，此时我们追加到末尾
         if (insertIndex == -1 || insertIndex > mainBodyInput.text.Length)
         {
             insertIndex = mainBodyInput.text.Length;
@@ -581,20 +575,15 @@ public class ArticleGenerator : MonoBehaviour
         string nodeTitle = node.Data.Title;
         string nodeContent = node.Data.Content;
 
-        // 3. 启动异步生成协程
         StartCoroutine(GenerateParagraphFromDrop(insertIndex, nodeTitle, nodeContent, node.NodeID));
     }
 
     private IEnumerator GenerateParagraphFromDrop(int insertIndex, string title, string content, string nodeID)
     {
-        // 1. 制作高亮的占位符
         string placeholderText = $"\n[ AI 正在将节点【{title}】展开为正文... ]\n";
-
-        // 2. 硬生生切开原文，插入占位符
         string originalText = mainBodyInput.text;
         mainBodyInput.text = originalText.Insert(insertIndex, placeholderText);
 
-        // 3. 组装 Prompt 给 LLM
         string prompt = $@"你是一个学术写作助手。用户将思维导图的一个节点拖入了文章中。
 请根据以下节点的标题和内容，扩写成一段自然流畅的正文段落，用于无缝插入到文章中。
 【节点标题】：{title}
@@ -604,19 +593,12 @@ public class ArticleGenerator : MonoBehaviour
         bool finished = false;
         string aiResult = "";
 
-        // 4. 发起请求
         if (LLMManager.Instance != null)
         {
             LLMManager.Instance.TaskChat(prompt, (response, success) =>
             {
-                if (success)
-                {
-                    aiResult = FormatChineseArticle(response);
-                }
-                else
-                {
-                    aiResult = $"\n[ 节点展开失败: {response} ]\n";
-                }
+                if (success) aiResult = FormatChineseArticle(response);
+                else aiResult = $"\n[ 节点展开失败: {response} ]\n";
                 finished = true;
             });
         }
@@ -628,11 +610,8 @@ public class ArticleGenerator : MonoBehaviour
 
         while (!finished) yield return null;
 
-        // 5. 替换占位符为生成的真实段落
-        // 注意：因为我们用了确切的占位符字符串，直接用 Replace 替换即可，极度安全
         mainBodyInput.text = mainBodyInput.text.Replace(placeholderText, "\n" + aiResult + "\n");
 
-        // 6. 埋点记录
         if (UserBehaviorSystem.Instance != null)
         {
             UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Node, "Article", $"DragDropNode_{nodeID}", 1);
@@ -640,7 +619,7 @@ public class ArticleGenerator : MonoBehaviour
     }
 
     // ==========================================
-    // 拖拽悬停视觉反馈：金色幽灵光标
+    // 拖拽悬停视觉反馈
     // ==========================================
     private RectTransform _dropCaret;
 
@@ -648,24 +627,20 @@ public class ArticleGenerator : MonoBehaviour
     {
         if (mainBodyInput == null || !articleModal.activeSelf) return;
 
-        // 1. 动态创建一个金色的光标线 (无需配置 Prefab)
         if (_dropCaret == null)
         {
             GameObject caretObj = new GameObject("DropCaret_AUBIM");
-            // 将光标挂载到 Text 内部，坐标系完美对齐
             caretObj.transform.SetParent(mainBodyInput.textComponent.transform, false);
             Image img = caretObj.AddComponent<Image>();
-            img.color = new Color(0f, 0f, 0f, 1f); // 醒目的黑色
+            img.color = new Color(0f, 0f, 0f, 1f);
 
             _dropCaret = caretObj.GetComponent<RectTransform>();
-            _dropCaret.pivot = new Vector2(0, 0); // 左下角对齐
-            // 宽度 3 像素，高度跟随当前字体大小
+            _dropCaret.pivot = new Vector2(0, 0);
             _dropCaret.sizeDelta = new Vector2(3f, mainBodyInput.textComponent.fontSize * 1.2f);
         }
 
         _dropCaret.gameObject.SetActive(true);
 
-        // 2. 计算当前鼠标正下方的字符索引
         TMP_Text textComp = mainBodyInput.textComponent;
         int insertIndex = TMP_TextUtilities.GetCursorIndexFromPosition(textComp, screenPos, cam);
 
@@ -677,16 +652,13 @@ public class ArticleGenerator : MonoBehaviour
 
         insertIndex = Mathf.Clamp(insertIndex, 0, textComp.textInfo.characterCount);
 
-        // 3. 将光标吸附到对应字符的物理坐标上
         Vector3 caretPos = Vector3.zero;
         if (insertIndex < textComp.textInfo.characterCount)
         {
-            // 停在某个字符前
             caretPos = textComp.textInfo.characterInfo[insertIndex].bottomLeft;
         }
         else
         {
-            // 停在整段话的最后面
             caretPos = textComp.textInfo.characterInfo[textComp.textInfo.characterCount - 1].bottomRight;
         }
 
@@ -698,6 +670,39 @@ public class ArticleGenerator : MonoBehaviour
         if (_dropCaret != null)
         {
             _dropCaret.gameObject.SetActive(false);
+        }
+    }
+
+    // ==========================================
+    // 视觉辅助：追加模式防弹级自动到底部 (智能自适应版)
+    // ==========================================
+    private IEnumerator ScrollToBottom(TMP_InputField inputField)
+    {
+        // 必须等待两帧！第一帧给文字赋值，第二帧给 UGUI 计算高度！
+        yield return null;
+        yield return null;
+
+        if (inputField != null)
+        {
+            inputField.ForceLabelUpdate();
+            Canvas.ForceUpdateCanvases();
+
+            if (inputField.verticalScrollbar != null)
+            {
+                // 【核心修复】：判断内容是否超出了视口高度
+                // size 代表滑块占整个轨道的比例。大于 0.99 说明内容很少，根本不需要滚动。
+                if (inputField.verticalScrollbar.size < 0.99f)
+                {
+                    // 情况 A：长篇大论，内容超出一页了。执行追加模式，强压到最底部！(1f)
+                    inputField.verticalScrollbar.value = 1f;
+                }
+                else
+                {
+                    // 情况 B：全新生成，内容很少。必须强行压到最顶部！(0f)
+                    // 这样就能防止单行文字被死死拽到输入框的最下边。
+                    inputField.verticalScrollbar.value = 0f;
+                }
+            }
         }
     }
 }

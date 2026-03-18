@@ -34,6 +34,8 @@ public class CoreBodyVisual : MonoBehaviour, IPointerClickHandler, IPointerEnter
     private bool _isSelected = false;
     private bool _isHovered = false;
 
+    private bool _isGhostMode = false;
+
     // 当发生单击时，通知 Controller 去处理选中逻辑
     public event System.Action OnRequestSelection;
 
@@ -88,10 +90,10 @@ public class CoreBodyVisual : MonoBehaviour, IPointerClickHandler, IPointerEnter
 
     public void SetGhostMode(bool isGhost)
     {
-        if (_mainCanvasGroup != null && !_isChildAdsorbing)
+        if (_isGhostMode != isGhost)
         {
-            // 幽灵模式：0.3 透明度；正常模式：1.0 不透明
-            _mainCanvasGroup.alpha = isGhost ? 0.3f : 1.0f;
+            _isGhostMode = isGhost;
+            UpdateVisuals(); // 状态改变，请求统一刷新
         }
     }
 
@@ -258,27 +260,29 @@ public class CoreBodyVisual : MonoBehaviour, IPointerClickHandler, IPointerEnter
         }
 
         // =========================================================
-        // 【新增】：AI 生成认知卡片的视觉弱化 (半透明草稿态)
+        // 【修正】：AI 认知卡片与幽灵模式的透明度控制 (纯状态驱动)
         // =========================================================
         var baseController = GetComponentInParent<BaseNodeController>();
-        if (baseController != null && _mainCanvasGroup != null)
+        if (_mainCanvasGroup != null)
         {
-            // 如果是幽灵模式，保持原来的高度透明
-            if (_mainCanvasGroup.alpha == 0.3f)
+            // 优先级 1：如果正在编辑，为了视觉清晰，强制完全不透明
+            if (IsEditing)
             {
-                // do nothing, let SetGhostMode control it
+                _mainCanvasGroup.alpha = 1.0f;
             }
-            // 如果是 AI 认知节点，并且还没有被用户“实体化”（即 isCognitiveNode 还是 true）
-            else if (baseController.isCognitiveNode)
+            // 优先级 2：如果是幽灵模式，并且不是正在作为子节点吸附的过程中
+            else if (_isGhostMode && !_isChildAdsorbing)
             {
-                // 给予一个半透明的玻璃态视觉暗示（比如 0.65 不透明度）
-                _mainCanvasGroup.alpha = 0.4f;
-
-                // 可选：你甚至可以在这里把边框改成虚线，或者把文字颜色调浅
+                _mainCanvasGroup.alpha = 0.8f;
             }
+            // 优先级 3：如果是AI认知草稿节点
+            else if (baseController != null && baseController.isCognitiveNode)
+            {
+                _mainCanvasGroup.alpha = 0.8f; // 玻璃态暗示
+            }
+            // 其他情况：正常完全不透明
             else
             {
-                // 普通节点，完全不透明
                 _mainCanvasGroup.alpha = 1.0f;
             }
         }
@@ -295,6 +299,8 @@ public class CoreBodyVisual : MonoBehaviour, IPointerClickHandler, IPointerEnter
             targetInput.interactable = true;
             targetInput.ActivateInputField();
             targetInput.Select();
+
+            UpdateVisuals();
         }
     }
 

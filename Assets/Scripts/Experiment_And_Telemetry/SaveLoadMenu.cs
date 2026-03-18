@@ -143,6 +143,21 @@ public class SaveLoadMenu : MonoBehaviour
 
     private void OnNewProjectClicked()
     {
+        Debug.Log("<color=yellow>[System]</color> 触发新建项目，正在强制清退所有 AI 进程与倒计时...");
+
+        // 1. 清理聊天区的逼问气泡（无论是正在等，还是已经弹出来了，全部销毁）
+        if (ChatSuggestionManager.Instance != null)
+        {
+            ChatSuggestionManager.Instance.ClearAllChips();
+        }
+
+        // 2. 终止 Tracker 里的所有静默观察、UI 闪烁、和挂机锁
+        if (InterventionTracker.Instance != null)
+        {
+            InterventionTracker.Instance.AbortLocalBreathing(); // 停止所有闪烁并结算
+            InterventionTracker.Instance.SetAIProcessing(false); // 解除 AI 生成锁定状态
+        }
+
         SaveSystem.Instance.CreateNewProject();
 
         if (projectNameInput)

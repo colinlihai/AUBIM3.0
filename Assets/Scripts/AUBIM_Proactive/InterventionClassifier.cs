@@ -16,6 +16,10 @@ public class LogisticRegressionWeights
     [Header("空间特征权重")]
     public float Weight_Area_Canvas = 0.0f;
     public float Weight_Area_Article = 0.0f;
+    public float Weight_Area_Chat = 0.0f;
+
+    [Header("聊天区动作权重 (Chat)")]
+    public float Weight_Type_chat_socratic_chip = 0.0f;
 
     [Header("画布区动作权重 (Canvas)")]
     public float Weight_Type_proactive_socratic = 0.0f;   // 反问
@@ -51,8 +55,8 @@ public class InterventionClassifier : MonoBehaviour
     public float explorationRate = 0.05f;
 
     [Header("端侧训练超参数")]
-    public float learningRate = 0.05f;
-    public int trainingEpochs = 100;
+    public float learningRate = 0.01f;
+    public int trainingEpochs = 20;
 
     [Header("当前活跃大脑 (白盒可视化)")]
     public LogisticRegressionWeights currentBrain;
@@ -131,6 +135,7 @@ public class InterventionClassifier : MonoBehaviour
 
         if (contextArea == "Canvas") z += currentBrain.Weight_Area_Canvas;
         else if (contextArea == "Article") z += currentBrain.Weight_Area_Article;
+        else if (contextArea == "Chat") z += currentBrain.Weight_Area_Chat;
 
         if (lastAction == "Global") z += currentBrain.Weight_LastAction_Global;
         else if (lastAction == "Local") z += currentBrain.Weight_LastAction_Local;
@@ -139,6 +144,8 @@ public class InterventionClassifier : MonoBehaviour
         // 2. 匹配具体类型的专属权重
         switch (interventionType)
         {
+            case "chat_socratic_chip": z += currentBrain.Weight_Type_chat_socratic_chip; break;
+
             case "proactive_socratic": z += currentBrain.Weight_Type_proactive_socratic; break;
             case "proactive_counter": z += currentBrain.Weight_Type_proactive_counter; break;
             case "proactive_elaborate": z += currentBrain.Weight_Type_proactive_elaborate; break;
@@ -220,14 +227,17 @@ public class InterventionClassifier : MonoBehaviour
 
                 if (point.ContextArea == "Canvas") currentBrain.Weight_Area_Canvas += learningRate * error;
                 else if (point.ContextArea == "Article") currentBrain.Weight_Area_Article += learningRate * error;
+                else if (point.ContextArea == "Chat") currentBrain.Weight_Area_Chat += learningRate * error;
 
                 if (actionStr == "Global") currentBrain.Weight_LastAction_Global += learningRate * error;
                 else if (actionStr == "Local") currentBrain.Weight_LastAction_Local += learningRate * error;
                 else if (actionStr == "Node") currentBrain.Weight_LastAction_Node += learningRate * error;
 
-                // 匹配 8 大细分类型进行权重更新
+                // 匹配 9 大细分类型进行权重更新
                 switch (point.InterventionType)
                 {
+                    case "chat_socratic_chip": currentBrain.Weight_Type_chat_socratic_chip += learningRate * error; break;
+
                     case "proactive_socratic": currentBrain.Weight_Type_proactive_socratic += learningRate * error; break;
                     case "proactive_counter": currentBrain.Weight_Type_proactive_counter += learningRate * error; break;
                     case "proactive_elaborate": currentBrain.Weight_Type_proactive_elaborate += learningRate * error; break;
@@ -241,5 +251,28 @@ public class InterventionClassifier : MonoBehaviour
             }
         }
         SaveBrain();
+    }
+
+    public bool ShouldTriggerIntervention(string interventionType, string contextArea, int canvasNodes, int selectedNodes, string lastAction = "None", string targetContent = "")
+    {
+        float prob = PredictAcceptanceProbability(interventionType, contextArea, canvasNodes, selectedNodes, lastAction, targetContent);
+
+        bool isApproved = prob >= acceptanceThreshold;
+        bool isExploration = false;
+
+        // 叛逆试探机制：打破信息茧房 (即使预测讨厌，也有极小概率强行弹出试探)
+        if (!isApproved && UnityEngine.Random.value < explorationRate)
+        {
+            isApproved = true;
+            isExploration = true;
+        }
+
+        string color = isApproved ? (isExploration ? "yellow" : "green") : "red";
+        string logMsg = $"<color={color}>[大脑裁决]</color> {interventionType} (前序动作:{lastAction}) | 预测采纳率:{(prob * 100):F1}% | 放行:{isApproved}";
+
+        if (isExploration) logMsg += " <color=yellow><b>[触发强制试探]</b></color>";
+
+        Debug.Log(logMsg);
+        return isApproved;
     }
 }

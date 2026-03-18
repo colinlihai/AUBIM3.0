@@ -31,6 +31,54 @@ public class ChatSuggestionManager : MonoBehaviour
         Instance = this;
     }
 
+    void OnEnable()
+    {
+        // 订阅全局遥测事件
+        if (UserBehaviorSystem.Instance != null) // 如果你的系统里是静态事件，可以直接写 UserBehaviorSystem.OnEventLogged += ...
+        {
+            UserBehaviorSystem.OnEventLogged += HandleGlobalUserEvent;
+        }
+    }
+
+    void OnDisable()
+    {
+        // 注销订阅防内存泄漏
+        if (UserBehaviorSystem.Instance != null)
+        {
+            UserBehaviorSystem.OnEventLogged -= HandleGlobalUserEvent;
+        }
+    }
+
+    private void HandleGlobalUserEvent(TelemetryLog log)
+    {
+        // 如果当前没有任何气泡在等待或存活，直接无视
+        if (_currentLifecycleCoroutine == null) return;
+
+        string eType = log.EventType;
+
+        // 如果侦测到任何在画布区 (Canvas) 或 成文区 (Article) 的实质性操作
+        if (eType.StartsWith("Canvas_") || eType.StartsWith("Article_") || eType.StartsWith("Edit_") || eType.StartsWith("Node_") || eType.StartsWith("Object_"))
+        {
+            if(_activeChips.Count == 0)
+            {
+                // 情景 A：气泡还没露面，用户就进入心流去干活了
+                Debug.Log($"<color=white>[Chat Suggestion]</color> 用户在气泡弹出前就切换了工作区 ({eType})。静默取消气泡生成，不产生 ML 惩罚！");
+                ClearAllChips(); // 直接掐断协程，不扣分！
+            }
+            else
+            {
+                // 情景 B：气泡已经弹出来了，用户看了一眼（或没看），转头去旁边干活了
+                Debug.Log($"<color=yellow>[Chat Suggestion]</color> 用户在气泡存活期切换了工作区 ({eType})，视为无视/搁置，记录 Ignored (-0.2分)！");
+
+                if (InterventionTracker.Instance != null)
+                {
+                    InterventionTracker.Instance.OnInterventionIgnored("chat_socratic_chip");
+                }
+                ClearAllChips(); // 扣分并销毁
+            }
+        }
+    }
+
     // ==========================================
     // 外部调用入口：当大模型回答完毕后，传入字数和解析好的逼问列表
     // ==========================================
@@ -38,8 +86,23 @@ public class ChatSuggestionManager : MonoBehaviour
     {
         // 清理上一波残留
         ClearAllChips();
-
         if (suggestions == null || suggestions.Count == 0) return;
+
+        if (InterventionClassifier.Instance != null && NodeCardManager.Instance != null)
+        {
+            int totalNodes = NodeCardManager.Instance.GetAllNodes().Count;
+            int selectedNodes = NodeCardManager.Instance.GetSelectedNodes().Count;
+
+            // 调用大脑的裁决方法 (附带叛逆试探机制)
+            bool shouldTrigger = InterventionClassifier.Instance.ShouldTriggerIntervention(
+                "chat_socratic_chip", "Chat", totalNodes, selectedNodes, "None");
+
+            if (!shouldTrigger)
+            {
+                Debug.Log("<color=orange>[AI Brain]</color> 大脑预测被试者目前极其反感聊天区逼问，取消本次气泡生成，避免激怒用户！");
+                return; // 直接熔断，绝不打扰！
+            }
+        }
 
         if (_currentLifecycleCoroutine != null) StopCoroutine(_currentLifecycleCoroutine);
         _currentLifecycleCoroutine = StartCoroutine(LifecycleRoutine(aiResponseWordCount, suggestions));
@@ -48,30 +111,63 @@ public class ChatSuggestionManager : MonoBehaviour
     private IEnumerator LifecycleRoutine(int wordCount, List<SuggestionData> suggestions)
     {
         // 1. 根据字数动态计算等待时间 (5 ~ 15秒)
-        float waitTime = Mathf.Clamp(wordCount / 20f, 5f, 15f);
+        float baseWaitTime = Mathf.Clamp(wordCount / 12f, 5f, 80f);
+        float tolerance = 0f;
+        if (InterventionTracker.Instance != null)
+        {
+            tolerance = InterventionTracker.Instance.GetToleranceOffset("chat_socratic_chip");
+        }
+
+        float finalWaitTime = baseWaitTime + tolerance;
         float timer = 0f;
 
-        Debug.Log($"<color=cyan>[Chat Suggestion]</color> AI 回复 {wordCount} 字，等待 {waitTime:F1} 秒后弹出逼问气泡...");
+        Debug.Log($"<color=cyan>[Chat Suggestion]</color> 基础阅读期 {baseWaitTime:F1}s + 专属容忍度 {tolerance:F1}s = 最终等待 {finalWaitTime:F1}s 后弹出气泡...");
 
-        // 【核心修复 1】：记录刚开始倒计时时的文本内容
-        string lastKnownText = chatPromptInput != null ? chatPromptInput.text : "";
+        // =========================================================
+        // 【防 TMP 幽灵字符滤镜】
+        // =========================================================
+        string GetCleanText()
+        {
+            if (chatPromptInput == null) return "";
+            return chatPromptInput.text.Replace("\u200B", "").Trim();
+        }
+
+        string lastKnownText = GetCleanText();
+
+        // 【新增：单次防抖锁】保证每次 AI 回复，只记录一次抢答，绝不随打字数量无限叠加！
+        bool hasTriggeredPreemptive = false;
 
         // 2. 第一阶段：隐忍等待期 (支持编辑时重置计时！)
-        while (timer < waitTime)
+        while (timer < finalWaitTime)
         {
             timer += Time.deltaTime;
 
             if (chatPromptInput != null && chatPromptInput.isFocused)
             {
-                // =========================================================
-                // 【核心修复 2】：抛弃 Input.anyKeyDown，直接比对底层字符串！
-                // 只要文字发生了变化，说明被试者正在疯狂打字，立刻把计时器砸回 0！
-                // =========================================================
-                if (chatPromptInput.text != lastKnownText)
+                string currentCleanText = GetCleanText();
+
+                // 只有纯净文本发生真实变化时，才算作人类敲击了键盘
+                if (currentCleanText != lastKnownText)
                 {
-                    Debug.Log("<color=yellow>[Chat Suggestion]</color> 用户正在输入，重置逼问生成倒计时...");
-                    timer = 0f; // 彻底清零重置！
-                    lastKnownText = chatPromptInput.text; // 更新比对基准，为下一次敲击做准备
+                    // =========================================================
+                    // 【新增：认知抢答判定】
+                    // 如果这是本轮等待期内，用户【第一次】输入真实字符，判定为抢答！
+                    // =========================================================
+                    if (!hasTriggeredPreemptive && currentCleanText.Length > 0)
+                    {
+                        hasTriggeredPreemptive = true; // 上锁，后续打字不再触发缩短时间
+
+                        Debug.Log("<color=magenta>[Chat Suggestion]</color> 用户在气泡出现前就开始了输入！触发【认知抢答】，加快下次气泡的生成速度。");
+
+                        if (InterventionTracker.Instance != null)
+                        {
+                            InterventionTracker.Instance.OnPreemptiveTyping("chat_socratic_chip");
+                        }
+                    }
+
+                    Debug.Log("<color=yellow>[Chat Suggestion]</color> 用户正在输入纯净文本，重置逼问生成倒计时...");
+                    timer = 0f; // 依然保留重置逻辑，只要手不停，气泡就不出
+                    lastKnownText = currentCleanText;
                 }
             }
             yield return null;
@@ -87,7 +183,20 @@ public class ChatSuggestionManager : MonoBehaviour
         }
 
         Canvas.ForceUpdateCanvases(); // 强行撑开布局防重叠
+
+        string textBeforeFade = chatPromptInput != null ? chatPromptInput.text.Trim() : "";
         yield return StartCoroutine(FadeChips(0f, 0.8f, 1f));
+
+        // 检查这 1 秒内文本是否发生了变化
+        if (chatPromptInput != null && chatPromptInput.isFocused)
+        {
+            if (chatPromptInput.text.Trim() != textBeforeFade)
+            {
+                Debug.Log("<color=white>[Chat Suggestion]</color> 用户在气泡淡入动画期间开始打字，属于【时机撞车】。静默销毁气泡，防止数据污染！");
+                ClearAllChips();
+                yield break; // 彻底了结协程，不扣分也不加分！
+            }
+        }
 
         // 4. 第三阶段：15秒存活倒计时
         _aliveTimer = 0f;
@@ -96,27 +205,64 @@ public class ChatSuggestionManager : MonoBehaviour
         // 记录气泡生成这一瞬间，Prompt 框里的文字
         string textWhenBubblesSpawned = chatPromptInput != null ? chatPromptInput.text : "";
 
+        float cognitiveReactionBuffer = 3f;
+
         while (_aliveTimer < 15f)
         {
             if (!_isAnyChipHovered) _aliveTimer += Time.deltaTime;
 
             // =========================================================
-            // 【ML 细分 1：主动拒绝 (-1.0分)】
-            // 监控文本变化：只要文本变了，说明被试者在自己打字！
+            // 【ML 逻辑重构：灵感激发判定】
+            // 监控文本变化：只要文本变了，说明被试者被气泡激活，开始自己打字了！
             // =========================================================
             if (chatPromptInput != null && chatPromptInput.isFocused)
             {
                 if (chatPromptInput.text != textWhenBubblesSpawned)
                 {
-                    Debug.Log("<color=red>[ML Tracker]</color> 用户在气泡存活期无视建议并自己输入了新内容，视为【主动拒绝】！记录 Explicit_Reject (-1.0分)");
-
-                    if (InterventionTracker.Instance != null)
+                    if (_aliveTimer < cognitiveReactionBuffer)
                     {
-                        InterventionTracker.Instance.OnInterventionRejected("chat_socratic_chip");
+                        Debug.Log($"<color=white>[Chat Suggestion]</color> 气泡存活仅 {_aliveTimer:F2}s 用户便开始输入，低于人类认知反应阈值。判定为【动作撞车】，静默销毁！");
+                        ClearAllChips();
+                        yield break; // 彻底了结协程，不产生任何 ML 记录！
                     }
 
+                    bool isTypingSuggestion = false;
+                    string currentInput = chatPromptInput.text.Trim();
+
+                    // 防抖：输入至少 2 个字符才开始判定
+                    if (currentInput.Length >= 2)
+                    {
+                        foreach (var suggestion in suggestions)
+                        {
+                            if (currentInput.Contains(suggestion.ShortTitle) ||
+                                suggestion.FullContent.Contains(currentInput))
+                            {
+                                isTypingSuggestion = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isTypingSuggestion)
+                    {
+                        // 情景 A：用户在手动抄写建议（虽然这很罕见，但也算采纳）
+                        Debug.Log("<color=green>[ML Tracker]</color> 用户正在手动抄写气泡内容，视为【显性采纳】！");
+                        if (InterventionTracker.Instance != null) InterventionTracker.Instance.OnButtonClicked("chat_socratic_chip");
+                    }
+                    else
+                    {
+                        // =========================================================
+                        // 【核心观念扭转】：这不再是拒绝！这是灵感被激发！
+                        // 情景 B：用户发呆了很久，看到气泡后，突然开始输入自己的全新内容。
+                        // 我们有理由相信是气泡的苏格拉底式提问促使了他去回答！
+                        // =========================================================
+                        Debug.Log("<color=magenta>[ML Tracker]</color> 气泡打破了发呆，用户开始自主输入新内容！视为【隐性采纳/灵感激发】。记录 Implicit_Scaffold_Accepted (+0.5分)");
+                        if (InterventionTracker.Instance != null) InterventionTracker.Instance.OnImplicitScaffoldAccepted("chat_socratic_chip");
+                    }
+
+                    // 判定完毕后，气泡功成身退，立刻销毁，绝不挡着用户打字！
                     ClearAllChips();
-                    yield break; // 彻底了结协程
+                    yield break;
                 }
             }
             yield return null;
@@ -161,7 +307,11 @@ public class ChatSuggestionManager : MonoBehaviour
 
     public void ClearAllChips()
     {
-        if (_currentLifecycleCoroutine != null) StopCoroutine(_currentLifecycleCoroutine);
+        if (_currentLifecycleCoroutine != null)
+        {
+            StopCoroutine(_currentLifecycleCoroutine);
+            _currentLifecycleCoroutine = null; // 核心加固：置空防多次触发
+        }
         foreach (var chip in _activeChips)
         {
             if (chip != null) Destroy(chip);

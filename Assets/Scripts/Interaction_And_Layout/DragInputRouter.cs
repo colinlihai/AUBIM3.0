@@ -262,9 +262,7 @@ public class DragInputRouter : MonoBehaviour, IBeginDragHandler, IDragHandler, I
 
         ClearAllFeedback();
 
-        // =========================================================
         // 检测是否拖拽到了成文区的正文输入框中
-        // =========================================================
         bool droppedOnArticle = false;
         if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy)
         {

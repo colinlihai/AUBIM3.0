@@ -47,7 +47,6 @@ public class LLMManager : MonoBehaviour
                 Debug.LogWarning("OpenAI 尚未实现");
                 break;
             case LLMProvider.Qwen:
-                // 修复点：MonoBehaviour 不能 new，必须 AddComponent 或 GetComponent ★★★
                 QwenService qwen = GetComponent<QwenService>();
                 if (qwen == null)
                 {
@@ -85,7 +84,6 @@ public class LLMManager : MonoBehaviour
     }
 
     // --- 供外部调用的统一入口 ---
-    // --- 供外部调用的统一入口 ---
     public void Chat(string userPrompt, LLMCallback callback)
     {
         if (_currentService == null)
@@ -106,9 +104,6 @@ public class LLMManager : MonoBehaviour
 
             string rawContext = ProjectContextGatherer.Instance.GetSystemPromptWithContext();
 
-            // =========================================================
-            // 【终极释放版】：彻底删掉格式和字数约束，让 AI 尽情挥洒！
-            // =========================================================
             systemContext = rawContext +
                 "\n\n====================\n" +
                 "【最高优先级指令：自然对话模式】\n" +
@@ -153,9 +148,7 @@ public class LLMManager : MonoBehaviour
                 // 3. 瞬间回调给 UI 显示，用户立刻能看到大段回答
                 callback?.Invoke(pureAnswer, true);
 
-                // =========================================================
                 // 【双轨黑科技】：后台隐蔽呼叫，专门去提取 3 个逼问！
-                // =========================================================
                 GenerateSocraticQuestionsInBackground(userPrompt, pureAnswer);
             }
             else
@@ -165,9 +158,7 @@ public class LLMManager : MonoBehaviour
         }));
     }
 
-    // ==========================================
     // 专职生产逼问的后台流水线
-    // ==========================================
     private void GenerateSocraticQuestionsInBackground(string userPrompt, string aiAnswer)
     {
         // 截取前面一部分回答即可，防止 Token 超出
