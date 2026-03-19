@@ -290,4 +290,55 @@ public class LLMManager : MonoBehaviour
         }
         Debug.Log($"[LLM] 已恢复 {_history.Count} 条历史记忆");
     }
+
+    // ==========================================
+    // AUBIM 4.0: 显式记忆控制与动态上下文引擎
+    // ==========================================
+
+    /// <summary>
+    /// 【新增】：供外部 (Copilot/UI) 手动将重要对话写入 AI 的永久记忆
+    /// </summary>
+    public void AddToHistory(string role, string content)
+    {
+        _history.Add(new ChatMessage(role, content));
+    }
+
+    /// <summary>
+    /// 【新增】：支持挂载“动态上下文”的聊天方法
+    /// 这里的 dynamicContext 作为 System Prompt 仅在本次请求发送，不会存入 _history 污染永久记忆！
+    /// </summary>
+    public void ChatWithDynamicContext(string userPrompt, string dynamicContext, Action<string, bool> callback)
+    {
+        if (_currentService == null)
+        {
+            callback?.Invoke("错误：AI服务未初始化", false);
+            return;
+        }
+
+        // 1. 用户的提问存入永久记忆
+        _history.Add(new ChatMessage("user", userPrompt));
+
+        // 2. 组装本次发送的包裹
+        List<ChatMessage> messagesToSend = new List<ChatMessage>();
+
+        // 挂载动态上下文（黑科技：不在 _history 中，只发这一次！）
+        if (!string.IsNullOrWhiteSpace(dynamicContext))
+        {
+            messagesToSend.Add(new ChatMessage("system", dynamicContext));
+        }
+
+        // 压入历史记忆
+        messagesToSend.AddRange(_history);
+
+        // 3. 发送请求
+        StartCoroutine(_currentService.PostRequest(messagesToSend, (response, success) =>
+        {
+            // AI 的回答存入永久记忆
+            if (success && !string.IsNullOrWhiteSpace(response))
+            {
+                _history.Add(new ChatMessage("assistant", response));
+            }
+            callback?.Invoke(response, success);
+        }));
+    }
 }

@@ -3,8 +3,8 @@ using UnityEngine.UI;
 using System.Collections;
 
 /// <summary>
-/// AUBIM 3.0 节点专属金色呼吸特效
-/// 使用安全状态机机制，保证被打断时 100% 恢复原色
+/// AUBIM 4.0 升级版：节点与常驻 UI 通用金色呼吸特效
+/// 使用安全状态机机制，保证被打断时 100% 恢复原色，并支持重复触发
 /// </summary>
 public class AINodeGlowEffect : MonoBehaviour
 {
@@ -12,8 +12,8 @@ public class AINodeGlowEffect : MonoBehaviour
     private Color _originalColor;
     private Color _goldenColor = new Color(1f, 0.8f, 0.2f, 1f); // 灵感金
 
-    // 核心修复：状态机标记
     private bool _isShuttingDown = false;
+    private Coroutine _glowCoroutine; // 新增：缓存当前协程，防止多次调用叠加闪烁
 
     void OnEnable()
     {
@@ -23,7 +23,7 @@ public class AINodeGlowEffect : MonoBehaviour
     void OnDisable()
     {
         UserBehaviorSystem.OnEventLogged -= HandleUserAction;
-        RestoreColor(); // 兜底防御，组件被卸载时必定恢复原色
+        RestoreColor(); // 兜底防御，组件被隐藏/卸载时必定恢复原色
     }
 
     public void StartGlow(float duration = 60f)
@@ -33,13 +33,26 @@ public class AINodeGlowEffect : MonoBehaviour
 
         if (_bgImage != null)
         {
+            // 如果已经在发光，先停止旧的
+            if (_glowCoroutine != null) StopCoroutine(_glowCoroutine);
+
             _originalColor = _bgImage.color;
-            StartCoroutine(GlowRoutine(duration));
+            _isShuttingDown = false; // 每次重新发光时，必须重置打断标记！
+
+            _glowCoroutine = StartCoroutine(GlowRoutine(duration));
         }
         else
         {
             Debug.LogWarning("[UI特效] 未找到节点的 Image 背景，无法播放金色呼吸。");
         }
+    }
+
+    // ==========================================
+    // 【新增核心接口】：供 Copilot 等外部大脑随时主动打断发光
+    // ==========================================
+    public void StopGlow()
+    {
+        _isShuttingDown = true;
     }
 
     private IEnumerator GlowRoutine(float duration)
@@ -60,12 +73,13 @@ public class AINodeGlowEffect : MonoBehaviour
             yield return null;
         }
 
-        // 循环结束（不论是因为超时，还是因为用户操作导致 _isShuttingDown 为 true）
+        // 循环结束（不论是因为超时，还是外部调用了 StopGlow，或是用户操作打断）
         // 都在协程的生命周期内安全地恢复原色
         RestoreColor();
+        _glowCoroutine = null;
 
-        // 延迟一帧销毁自身，避免影响当前帧的 UI 渲染
-        Destroy(this);
+        // 【核心修复】：删除了 Destroy(this)！
+        // 4.0 的发光组件挂载在常驻按钮上，绝不能自我销毁，否则下次无法再次触发！
     }
 
     private void HandleUserAction(TelemetryLog log)
@@ -83,7 +97,6 @@ public class AINodeGlowEffect : MonoBehaviour
             log.EventType.StartsWith("Object_") ||
             log.EventType.StartsWith("Article_"))
         {
-            // 【核心修复】：不再使用暴力的 StopCoroutine
             // 优雅地修改标记位，让协程自己退出，杜绝死锁与定格
             _isShuttingDown = true;
         }

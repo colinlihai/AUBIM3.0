@@ -239,109 +239,32 @@ public class ProactiveInterventionSystem : MonoBehaviour
     // ==========================================
     // 逻辑 2：成文区生成柔和提示
     // ==========================================
-    private void GenerateArticleIntervention(InterventionType type)
+    private void GenerateArticleIntervention(InterventionType type, BaseNodeController contextNode = null, int stage = 1)
     {
-        if (ArticleGenerator.Instance == null || ArticleGenerator.Instance.mainBodyInput == null) return;
+        // 1. 检查成文区是否打开，未打开则不介入
+        if (ArticleGenerator.Instance == null || !ArticleGenerator.Instance.articleModal.activeSelf) return;
 
-        if (ArticleGenerator.Instance.articlePromptInput != null)
+        // 2. 检查聊天区是否被占用 (如果用户正在聊天框打字，不打扰)
+        if (AIChatManager.Instance != null && AIChatManager.Instance.chatInput != null)
         {
-            string currentPromptText = ArticleGenerator.Instance.articlePromptInput.text;
-            if (!string.IsNullOrWhiteSpace(currentPromptText))
+            if (!string.IsNullOrWhiteSpace(AIChatManager.Instance.chatInput.text))
             {
-                Debug.Log($"<color=yellow>[AI 主动介入]</color> 检测到用户在 Prompt 框已有草稿，为保护用户数据，取消本次生成。");
-                return; // 直接打断施法，不再调用 LLM！
+                Debug.Log($"<color=yellow>[AI 主动介入]</color> 用户正在聊天框打字，取消本次主动引导。");
+                return;
             }
         }
 
-        string draftText = ArticleGenerator.Instance.mainBodyInput.text;
-        int textLength = draftText.Length;
-        string currentFocusText = "";
-        TMP_InputField input = ArticleGenerator.Instance.mainBodyInput;
-
-        int stage = 0; // 0=冷启动, 1=宏观失焦, 2=微观聚焦
-
-        if (textLength < 10)
+        // 3. 极其轻量级的调用：不再请求大模型，直接让 Copilot 中枢智能闪烁对应的按钮！
+        if (CopilotActionController.Instance != null)
         {
-            stage = 0;
-            currentFocusText = "（当前正文区完全空白，用户处于起始发呆状态）";
-            Debug.Log($"<color=yellow>[AI 冷启动抓取]</color> 当前无文字，触发破冰引导！");
-        }
-        else if (!input.isFocused)
-        {
-            stage = 1;
-            int extractLength = Mathf.Min(textLength, 1500);
-            currentFocusText = draftText.Substring(0, extractLength);
-            Debug.Log($"<color=cyan>[AI 全局抓取]</color> 用户失焦，触发全文宏观审视！分析字数: {extractLength}");
-        }
-        else
-        {
-            stage = 2;
-            int cursorIndex = input.selectionFocusPosition;
-            if (cursorIndex <= 0) cursorIndex = 0;
-            if (cursorIndex > textLength) cursorIndex = textLength;
-
-            // 【核心逻辑】：判断光标是否在文章末尾（容差 15 个字符，允许末尾有几个换行或标点）
-            bool isAtEnd = (textLength - cursorIndex) <= 15;
-
-            if (isAtEnd)
-            {
-                // 推进状态：只抓取上文
-                int extractLength = Mathf.Min(cursorIndex, 300);
-                string beforeText = draftText.Substring(cursorIndex - extractLength, extractLength);
-                currentFocusText = $"【当前光标前的上文】：\n{beforeText}";
-
-                Debug.Log($"<color=yellow>[AI 局部抓取 - 推进模式]</color> 光标在末尾。");
-            }
-            else
-            {
-                // 缝合状态：抓取上下文
-                int extractBefore = Mathf.Min(cursorIndex, 200); // 往前抓 200
-                int extractAfter = Mathf.Min(textLength - cursorIndex, 200); // 往后抓 200
-
-                string beforeText = draftText.Substring(cursorIndex - extractBefore, extractBefore);
-                string afterText = draftText.Substring(cursorIndex, extractAfter);
-
-                currentFocusText = $"【光标前的上文】：\n{beforeText}\n\n【光标后的下文】：\n{afterText}";
-
-                // 为了让文库知道这是中间插入，我们把 stage 临时设为 3 (代表缝合模式)
-                stage = 3;
-                Debug.Log($"<color=yellow>[AI 局部抓取 - 缝合模式]</color> 光标在段落中间。");
-            }
+            CopilotActionController.Instance.TriggerProactiveGlow();
         }
 
-        // 【优化】：从文库获取成文区 Prompt
-        bool hasNodes = (NodeCardManager.Instance != null && NodeCardManager.Instance.GetAllNodes().Count > 0);
-        string systemRole = AIPromptLibrary.GetArticleInterventionPrompt(type, stage, hasNodes);
-
-        // 组装最终 Prompt
-        string prompt = $@"{systemRole}
-【当前阅读的草稿内容】：
-{currentFocusText}
-
-{AIPromptLibrary.Article_Output_Rules}";
-
-        LLMManager.Instance.TaskChat(prompt, (response, success) =>
+        // 4. 埋点记录，保留数据科学管线的完整性
+        if (UserBehaviorSystem.Instance != null)
         {
-            if (ArticleGenerator.Instance != null && ArticleGenerator.Instance.articlePromptInput != null)
-            {
-                if (!string.IsNullOrWhiteSpace(ArticleGenerator.Instance.articlePromptInput.text))
-                {
-                    Debug.Log($"<color=yellow>[AI 主动介入]</color> AI 返回结果时，用户已开始输入内容，放弃覆盖上屏。");
-                    return; // 防止网络请求延时，就算 LLM 生成得再好也扔掉，保卫用户数据！
-                }
-            }
-
-            if (success && !string.IsNullOrWhiteSpace(response) && ArticleGenerator.Instance.articlePromptInput != null)
-            {
-                string cleanResponse = response.Trim().Replace("\n", "").Replace("\r", "");
-                ArticleGenerator.Instance.StartPromptBreathing(type.ToString(), cleanResponse, 60f);
-
-                if (UserBehaviorSystem.Instance != null)
-                {
-                    string stageInfo = stage == 0 ? "Stage0_ColdStart" : (stage == 1 ? "Macro_Global" : "Micro_Local");
-                    UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: "Article", info: $"{type.ToString()}_{stageInfo}");
-                }
-            }
-        }, false);
+            string stageInfo = stage == 0 ? "Stage0_ColdStart" : (stage == 1 ? "Macro_Global" : "Micro_Local");
+            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Intervention_Triggered, targetID: "Article", info: $"{type.ToString()}_{stageInfo}");
+        }
     }
 }

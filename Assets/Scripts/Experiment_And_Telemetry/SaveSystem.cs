@@ -79,11 +79,11 @@ public class SaveSystem : MonoBehaviour
         // 确保列表已初始化（防止空引用报错）
         if (data.Nodes == null) data.Nodes = new List<NodeSaveDTO>();
 
-        // A. 保存文章 (包含左侧草稿和右侧AI建议)
+        // A. 保存文章草稿 (4.0 已废除独立的 aiSuggestionInput，AI 记录全部在 ChatHistory 中)
         if (articleGen != null)
         {
             data.ArticleDraft = articleGen.mainBodyInput != null ? articleGen.mainBodyInput.text : "";
-            data.AISuggestion = articleGen.aiSuggestionInput != null ? articleGen.aiSuggestionInput.text : "";
+            data.AISuggestion = ""; // 保持结构体兼容，但不再保存旧 UI 内容
         }
 
         // B. 保存聊天记录
@@ -277,8 +277,7 @@ public class SaveSystem : MonoBehaviour
         if (articleGen != null)
         {
             string cleanDraft = string.IsNullOrEmpty(data.ArticleDraft) ? "" : data.ArticleDraft.Replace("\r", "");
-            string cleanSuggestion = string.IsNullOrEmpty(data.AISuggestion) ? "" : data.AISuggestion.Replace("\r", "");
-            articleGen.RestoreArticleData(cleanDraft, cleanSuggestion);
+            articleGen.RestoreArticleData(cleanDraft); // 4.0 仅需恢复正文草稿
         }
 
         yield return null;
@@ -372,7 +371,7 @@ public class SaveSystem : MonoBehaviour
 
         if (articleGen != null)
         {
-            articleGen.RestoreArticleData("", "");
+            articleGen.RestoreArticleData(""); // 4.0 仅清空正文
         }
 
         yield return null;

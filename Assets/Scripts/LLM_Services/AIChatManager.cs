@@ -13,6 +13,10 @@ public class AIChatManager : MonoBehaviour
     public TMP_InputField chatInput;
     public ScrollRect scrollRect;
 
+    [Header("AUBIM 4.0 上下文挂载开关")]
+    public UnityEngine.UI.Toggle toggleMountTree;    // 挂载全局导图开关
+    public UnityEngine.UI.Toggle toggleMountArticle; // 挂载正文内容开关
+
     [Header("Prefab")]
     public GameObject messagePrefab;
 
@@ -28,9 +32,11 @@ public class AIChatManager : MonoBehaviour
     {
         if (chatInput != null)
         {
-            // 【新增：锁定动作 A】点击输入框准备打字时上锁
+            // 【锁定动作 A】点击输入框准备打字时上锁
             chatInput.onSelect.AddListener((val) => {
                 if (InterventionTracker.Instance != null) InterventionTracker.Instance.SuspendByChat();
+                // 【新增：广播输入框获得焦点，Copilot 将据此生成引用气泡】
+                if (CopilotActionController.Instance != null) CopilotActionController.Instance.OnChatInputSelected();
             });
 
             chatInput.onSubmit.AddListener((val) => {
@@ -45,7 +51,7 @@ public class AIChatManager : MonoBehaviour
         string text = chatInput.text.TrimEnd('\r', '\n', ' ');
         if (string.IsNullOrWhiteSpace(text)) return;
 
-        // 【新增：锁定动作 B】发送消息并等待回复时，继续保持锁定状态
+        // 【锁定动作 B】发送消息并等待回复时，继续保持锁定状态
         if (InterventionTracker.Instance != null) InterventionTracker.Instance.SuspendByChat();
 
         // 1. 组装数据并记录到本地 UI 数据列表 (用于存盘)
@@ -64,8 +70,17 @@ public class AIChatManager : MonoBehaviour
             UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Query, "User", "Chat", text.Length);
         }
 
-        // 4. 发送给 LLMManager
-        StartCoroutine(RequestAI(text));
+        bool intercepted = false;
+        if (CopilotActionController.Instance != null)
+        {
+            intercepted = CopilotActionController.Instance.TryInterceptChatSubmit(text);
+        }
+
+        // 如果 Copilot 没有拦截 (说明不是在续写/衔接模式)，就走普通的 AI 闲聊
+        if (!intercepted)
+        {
+            StartCoroutine(RequestAI(text));
+        }
     }
 
     private System.Collections.IEnumerator ResetInputNextFrame()
@@ -87,43 +102,79 @@ public class AIChatManager : MonoBehaviour
     {
         if (LLMManager.Instance != null)
         {
-            // 调用核心 Chat 接口
-            LLMManager.Instance.Chat(userPrompt, (response, success) =>
+            // 组装动态上下文
+            System.Text.StringBuilder dynamicContext = new System.Text.StringBuilder();
+
+            // 检查导图开关是否打开
+            if (toggleMountTree != null && toggleMountTree.isOn && ProjectContextGatherer.Instance != null)
             {
-                if (success)
+                dynamicContext.AppendLine("【用户提供的参考资料 1：当前全局思维导图结构】");
+                dynamicContext.AppendLine(ProjectContextGatherer.Instance.GetTreeStructureContext_Public());
+                dynamicContext.AppendLine("------------------");
+            }
+
+            // 检查正文开关是否打开
+            if (toggleMountArticle != null && toggleMountArticle.isOn && ArticleGenerator.Instance != null && ArticleGenerator.Instance.mainBodyInput != null)
+            {
+                dynamicContext.AppendLine("【用户提供的参考资料 2：当前正文内容】");
+                dynamicContext.AppendLine(ArticleGenerator.Instance.mainBodyInput.text);
+                dynamicContext.AppendLine("------------------");
+            }
+
+            string contextStr = dynamicContext.ToString();
+
+            // 调用刚刚写好的动态上下文聊天接口
+            LLMManager.Instance.ChatWithDynamicContext(userPrompt, contextStr, (response, success) =>
+            {
+                if (success && !string.IsNullOrWhiteSpace(response))
                 {
-                    // 【核心修复】：如果 AI 仅仅输出了后台指令，剥离后剩下的是空文本，就直接跳过，不生成空白气泡！
-                    if (!string.IsNullOrWhiteSpace(response))
-                    {
-                        // 记录到本地 UI 数据列表
-                        var aiMsg = new ChatMessageData { role = "assistant", content = response, timestamp = System.DateTime.Now.ToString() };
-                        _allMessages.Add(aiMsg);
-
-                        // UI 显示 AI 回复并绑定数据
-                        AddBubbleUI(aiMsg, false);
-
-                        // [埋点]
-                        if (UserBehaviorSystem.Instance != null)
-                        {
-                            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Response, "AI", "Reply", response.Length);
-                        }
-                    }
+                    var aiMsg = new ChatMessageData { role = "assistant", content = response, timestamp = System.DateTime.Now.ToString() };
+                    _allMessages.Add(aiMsg);
+                    AddBubbleUI(aiMsg, false);
+                    // [埋点]
+                    if (UserBehaviorSystem.Instance != null)
+                        UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Response, "AI", "Reply", response.Length);
                 }
-                else
+                else if (!success)
                 {
-                    // 错误信息也包装成 Data 显示，但不存入 LLM 历史
                     var errMsg = new ChatMessageData { role = "assistant", content = $"[错误] {response}", timestamp = System.DateTime.Now.ToString() };
                     AddBubbleUI(errMsg, false);
                 }
             });
-
             yield return null;
         }
-        else
+    }
+
+    // ==========================================
+    // 供外部 (Copilot 中枢) 调用的气泡生成接口
+    // ==========================================
+
+    /// <summary> 生成工具结果的 AI 气泡，并可选择是否写入大模型记忆 </summary>
+    public void AddSystemAIBubble(string text, bool remember = false)
+    {
+        var aiMsg = new ChatMessageData { role = "assistant", content = text, timestamp = System.DateTime.Now.ToString() };
+        _allMessages.Add(aiMsg);
+        AddBubbleUI(aiMsg, false);
+
+        // 【分级记忆核心】：如果要求记忆，手动写入大模型脑中
+        if (remember && LLMManager.Instance != null)
         {
-            Debug.LogError("LLMManager instance not found");
-            var missingMsg = new ChatMessageData { role = "assistant", content = "错误：LLMManager 未初始化", timestamp = System.DateTime.Now.ToString() };
-            AddBubbleUI(missingMsg, false);
+            LLMManager.Instance.AddToHistory("assistant", text);
+        }
+    }
+
+    /// <summary> 生成上下文引用气泡，并可选择是否写入大模型记忆 </summary>
+    public void AddContextQuoteBubble(string quoteText, bool remember = false)
+    {
+        string formattedQuote = $"<i><color=#555555>锚点：\n\"{quoteText}\"</color></i>";
+        var quoteMsg = new ChatMessageData { role = "user", content = formattedQuote, timestamp = System.DateTime.Now.ToString() };
+        _allMessages.Add(quoteMsg);
+        AddBubbleUI(quoteMsg, true);
+
+        // 告诉 AI 用户引用了这段话
+        if (remember && LLMManager.Instance != null)
+        {
+            LLMManager.Instance.AddToHistory("user", $"我圈定了以下文本作为参考：\n{quoteText}");
         }
     }
 
@@ -142,7 +193,7 @@ public class AIChatManager : MonoBehaviour
         {
             ctrl.Setup(msgData.content, isUser);
 
-            // 【核心修改】：接管气泡上的专属删除按钮
+            // 接管气泡上的专属删除按钮
             if (ctrl.deleteButton != null)
             {
                 // 先清空一下，防止重复绑定
@@ -162,7 +213,7 @@ public class AIChatManager : MonoBehaviour
         StartCoroutine(ScrollToBottom());
     }
 
-    // [新增] 处理气泡销毁与三端数据同步
+    // 处理气泡销毁与三端数据同步
     private void DeleteChatBubble(GameObject bubbleObj, ChatMessageData msgData)
     {
         // 1. 从本地存盘数据中剔除
@@ -255,5 +306,53 @@ public class AIChatManager : MonoBehaviour
         if (LLMManager.Instance == null) return;
         LLMManager.Instance.ClearHistory();
         LLMManager.Instance.RestoreHistory(_allMessages);
+    }
+
+    // ==========================================
+    // 供外部调用的输入框金色引导光效 (AUBIM 4.0 视觉锚点)
+    // ==========================================
+    private Coroutine _inputGlowCoroutine;
+    private Color _originalInputColor = Color.white; // 默认底色
+
+    public void StartChatInputGlow()
+    {
+        if (chatInput == null) return;
+        Image bg = chatInput.GetComponent<Image>();
+        if (bg == null) return;
+
+        // 防止重复触发
+        if (_inputGlowCoroutine != null) StopCoroutine(_inputGlowCoroutine);
+
+        _originalInputColor = bg.color;
+        _inputGlowCoroutine = StartCoroutine(ChatInputGlowRoutine(bg));
+    }
+
+    public void StopChatInputGlow()
+    {
+        if (_inputGlowCoroutine != null)
+        {
+            StopCoroutine(_inputGlowCoroutine);
+            _inputGlowCoroutine = null;
+        }
+
+        // 恢复原始颜色
+        if (chatInput != null)
+        {
+            Image bg = chatInput.GetComponent<Image>();
+            if (bg != null) bg.color = _originalInputColor;
+        }
+    }
+
+    private IEnumerator ChatInputGlowRoutine(Image bg)
+    {
+        Color goldColor = new Color(1f, 0.84f, 0f, 1f); // 闪耀的金色
+        float speed = 4f; // 呼吸频率，可自行微调
+        while (true)
+        {
+            // 使用 Sin 函数制作平滑的呼吸灯效果
+            float t = (Mathf.Sin(Time.time * speed) + 1f) / 2f;
+            bg.color = Color.Lerp(_originalInputColor, goldColor, t);
+            yield return null;
+        }
     }
 }

@@ -88,6 +88,12 @@ public class ProjectContextGatherer : MonoBehaviour
         return sb.ToString().Trim();
     }
 
+    public string GetTreeStructureContext_Public()
+    {
+        // 调用您脚本里现有的提取逻辑，通常您脚本里有一个 GetTreeStructureContext() 方法
+        return GetTreeStructureContext();
+    }
+
     private void AppendNodeContextDFS(BaseNodeController node, StringBuilder sb, int depth)
     {
         if (node == null || !node.gameObject.activeSelf) return;

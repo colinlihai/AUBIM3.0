@@ -697,6 +697,11 @@ public class InterventionTracker : MonoBehaviour
         OnInterventionIgnored(_lastPredictedRecordKey);
     }
 
+    public void SetLastPredictedRecordKey(string explicitKey)
+    {
+        _lastPredictedRecordKey = NormalizeMLKey(explicitKey);
+    }
+
     // =========================================================
     // 【核心修复 2：数据规范化漏斗】解决键值分裂与大小写不一致
     // =========================================================
@@ -708,22 +713,19 @@ public class InterventionTracker : MonoBehaviour
         // 聊天区
         if (lower.Contains("chat") || lower.Contains("chip")) return "chat_socratic_chip";
 
-        // 成文区 (4 Stage)
-        if (lower.Contains("coldstart") || lower.Contains("stage0")) return "article_coldstart";
-        if (lower.Contains("expand")) return "article_expand";
-        if (lower.Contains("stitch")) return "article_stitch";
-        if (lower.Contains("reflect")) return "article_reflect";
+        // AUBIM 4.0 成文区 5 大工具映射
+        if (lower.Contains("coldstart") || lower.Contains("globaldraft")) return "article_coldstart";
+        if (lower.Contains("expand") || lower.Contains("contextexpand")) return "article_expand";
+        if (lower.Contains("stitch") || lower.Contains("contexttransition")) return "article_stitch";
+        if (lower.Contains("refine") || lower.Contains("localrefine")) return "article_refine";
+        if (lower.Contains("reflect") || lower.Contains("globalreview")) return "article_reflect";
 
-        // 画布区 (4 Proactive)
+        // 画布区
         if (lower.Contains("socratic")) return "proactive_socratic";
         if (lower.Contains("counter")) return "proactive_counter";
         if (lower.Contains("elaborate")) return "proactive_elaborate";
         if (lower.Contains("global")) return "proactive_global";
 
-        // 兜底防线：如果UI传了类似 "ManualTriggered"
-        if (lower.Contains("manual")) return "proactive_global";
-
-        // 极致兜底
         return lower;
     }
 }
