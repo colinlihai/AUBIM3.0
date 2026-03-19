@@ -496,8 +496,32 @@ public class ArticleGenerator : MonoBehaviour
 
     public void OnOpenModal()
     {
-        if (articleModal != null) articleModal.SetActive(true);
-        if (promptInput != null) promptInput.text = "";
+        if (articleModal != null)
+        {
+            if (!articleModal.activeSelf)
+            {
+                // 情况 A：当前是关闭状态，正常打开
+                articleModal.SetActive(true);
+                if (promptInput != null) promptInput.text = "";
+            }
+            else
+            {
+                // 【新增核心体验】：情况 B：已经是打开状态，执行物理复位！
+                RectTransform rect = articleModal.GetComponent<RectTransform>();
+                if (rect != null)
+                {
+                    // 将坐标强行归零。只要你 Modal 的 Anchor 是居中的，它就会完美回到屏幕正中央
+                    rect.anchoredPosition = Vector2.zero;
+
+                    // (可选) 给用户一个极其舒适的视觉反馈
+                    if (ToastSystem.Instance != null)
+                    {
+                        ToastSystem.Instance.Show("成文区已复位到屏幕中央");
+                    }
+                    Debug.Log("<color=green>[UI 系统]</color> 成文区已一键复位！");
+                }
+            }
+        }
     }
 
     public void CloseModal()
