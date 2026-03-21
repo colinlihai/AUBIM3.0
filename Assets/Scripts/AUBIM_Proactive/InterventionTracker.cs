@@ -41,9 +41,6 @@ public class UserProfileData
     public List<InterventionRecord> actionRecords = new List<InterventionRecord>();
 }
 
-// ==========================================
-// 主系统
-// ==========================================
 public class InterventionTracker : MonoBehaviour
 {
     public static InterventionTracker Instance;
@@ -67,6 +64,7 @@ public class InterventionTracker : MonoBehaviour
 
     private float _idleTimer = 0f;
     private bool _isBreathingActive = false;
+    private float _currentBreathingDuration = 0f;
     private string _lastPredictedRecordKey = ""; // 记录当前正在闪烁的专属类型 Key
 
     private bool _isObserving = false;
@@ -105,7 +103,13 @@ public class InterventionTracker : MonoBehaviour
 
     public void GrantReadingBuffer(int charCount)
     {
-        _readingBuffer = Mathf.Clamp(charCount * 0.1f, 0f, 120f);
+        float baseTime = charCount <= 100 ? charCount * 0.1f : 10f + (charCount - 100) * 0.03f;
+
+        // 获取当前被试者针对聊天逼问气泡的专属容忍度
+        float tolerance = GetToleranceOffset("chat_socratic_chip");
+
+        // 最终护盾 = 基础阅读 + 容忍度，且硬性封顶最高不超过 50 秒
+        _readingBuffer = Mathf.Clamp(baseTime + tolerance, 0f, 50f);
         _idleTimer = 0f;
         Debug.Log($"<color=cyan>[Tracker]</color> AI 输出了 {charCount} 字，阅读免打扰护盾启动：{_readingBuffer:F1} 秒。");
     }
@@ -128,13 +132,18 @@ public class InterventionTracker : MonoBehaviour
         }
     }
 
-    // ==========================================
-    // 核心循环 Update
-    // ==========================================
     void Update()
     {
+        // 捕获所有物理输入
+        bool isUsingIME = !string.IsNullOrEmpty(Input.compositionString);
+        bool hasTextInput = !string.IsNullOrEmpty(Input.inputString);
+        bool hasMouseAction = Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) || Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f;
+        bool hasAnyInput = Input.anyKey || isUsingIME || hasTextInput || hasMouseAction;
+
         if (_isBreathingActive)
         {
+            _currentBreathingDuration += Time.deltaTime;
+
             bool isPhysicallyBreathing = false;
 
             if (proactiveButtons != null)
@@ -157,9 +166,24 @@ public class InterventionTracker : MonoBehaviour
                 }
             }
 
+            if (!isPhysicallyBreathing && CopilotActionController.Instance != null)
+            {
+                if (CopilotActionController.Instance.IsAnyButtonGlowing)
+                {
+                    isPhysicallyBreathing = true;
+                }
+            }
+
             if (!isPhysicallyBreathing)
             {
                 Debug.Log("<color=yellow>[Tracker 守卫]</color> 物理 UI 已消失，清理静默残留并结算为搁置！");
+                AbortLocalBreathing();
+                return;
+            }
+
+            if (hasTextInput || isUsingIME || Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.Backspace))
+            {
+                Debug.Log("<color=yellow>[Tracker 守卫]</color> 侦测到键盘输入，强行打断当前 AI 闪烁！");
                 AbortLocalBreathing();
                 return;
             }
@@ -174,57 +198,59 @@ public class InterventionTracker : MonoBehaviour
                 return;
             }
 
+            // 无论系统处于什么锁死状态，只要检测到用户在操作键鼠，立刻重置并解锁！
+            if (hasAnyInput)
+            {
+                if (_isAwaitingUserAction)
+                {
+                    Debug.Log("<color=green>[Tracker 解锁]</color> 侦测到物理输入动作，解除防挂机锁！");
+                    _isAwaitingUserAction = false;
+                }
+
+                _idleTimer = 0f;
+
+                // 阅读护盾仅在点击或按键时破坏，单纯滚轮不破坏
+                if (Input.anyKey || isUsingIME || hasTextInput || Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2))
+                {
+                    _readingBuffer = 0f;
+                }
+
+                return; // 跳过本帧的发呆累加
+            }
+
+            // 如果处于防挂机锁定状态，不再继续累加发呆时间
             if (_isAwaitingUserAction)
             {
                 _idleTimer = 0f;
                 return;
             }
 
-            bool isUsingIME = !string.IsNullOrEmpty(Input.compositionString);
-            bool hasTextInput = !string.IsNullOrEmpty(Input.inputString);
-
-            if (Input.anyKey || isUsingIME || hasTextInput)
+            if (_readingBuffer > 0)
             {
+                _readingBuffer -= Time.deltaTime;
                 _idleTimer = 0f;
-                _readingBuffer = 0f;
-            }
-            else if (Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2) || Mathf.Abs(Input.mouseScrollDelta.y) > 0.1f)
-            {
-                _idleTimer = 0f;
-                if (Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2))
-                {
-                    _readingBuffer = 0f;
-                }
             }
             else
             {
-                if (_readingBuffer > 0)
+                bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+                int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
+                int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
+                if (!isArticleActive && selectedNodes == 0 && totalNodes <= 5)
                 {
-                    _readingBuffer -= Time.deltaTime;
                     _idleTimer = 0f;
+                    return;
                 }
-                else
+
+                _idleTimer += Time.deltaTime;
+
+                InterventionType bestType = GetBestPredictedType(out string contextStr, out bool isGlobal, out string recordKey);
+
+                float specificOffset = GetToleranceOffset(recordKey);
+                float currentThreshold = (contextStr == "Article" ? baseArticleStall : baseCanvasStall) + specificOffset;
+
+                if (_idleTimer >= currentThreshold)
                 {
-                    bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
-                    int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
-                    int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
-                    if (!isArticleActive && selectedNodes == 0 && totalNodes <= 5)
-                    {
-                        _idleTimer = 0f;
-                        return;
-                    }
-
-                    _idleTimer += Time.deltaTime;
-
-                    InterventionType bestType = GetBestPredictedType(out string contextStr, out bool isGlobal, out string recordKey);
-
-                    float specificOffset = GetToleranceOffset(recordKey);
-                    float currentThreshold = (contextStr == "Article" ? baseArticleStall : baseCanvasStall) + specificOffset;
-
-                    if (_idleTimer >= currentThreshold)
-                    {
-                        TriggerProactiveBreathing(bestType, recordKey, contextStr, isGlobal);
-                    }
+                    TriggerProactiveBreathing(bestType, recordKey, contextStr, isGlobal);
                 }
             }
         }
@@ -241,11 +267,13 @@ public class InterventionTracker : MonoBehaviour
     }
 
     // ==========================================
-    // 预测与触发逻辑 (完美对齐分类器 8 大特征)
+    // 预测与触发逻辑：完美实现 9 大 Button 的严格隔离与映射
     // ==========================================
     private InterventionType GetBestPredictedType(out string contextStr, out bool isGlobal, out string exactMLKey)
     {
+        // 核心路由隔离：以 ArticleModal 的状态为绝对权威
         bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+
         int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
         int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
 
@@ -256,63 +284,79 @@ public class InterventionTracker : MonoBehaviour
 
         if (InterventionClassifier.Instance == null) return bestType;
 
-        // 1. 提取当前焦点文本，传给分类器进行“启发式偏置 (问号/字数识别)”
-        string targetContent = selectedNodes > 0 && NodeCardManager.Instance.GetSelectedNodes()[0].Data != null
-                               ? NodeCardManager.Instance.GetSelectedNodes()[0].Data.Content : "";
-
         float maxProb = -1f;
 
+        // =========================================================
+        // 路由 A：成文区 5 大按钮触发逻辑
+        // =========================================================
         if (isArticleActive)
         {
-            // =========================================================
-            // 成文区：根据物理光标位置，精确定位 4 个 Stage 之一
-            // =========================================================
-            string text = ArticleGenerator.Instance.mainBodyInput.text;
-            bool isFocused = ArticleGenerator.Instance.mainBodyInput.isFocused;
-            int cursorIndex = ArticleGenerator.Instance.mainBodyInput.selectionFocusPosition;
+            var input = ArticleGenerator.Instance.mainBodyInput;
+            string text = input.text;
+            bool isFocused = input.isFocused;
+            int cursorIndex = input.selectionFocusPosition;
+
+            // 判断用户是否有高亮选中文本
+            int selStart = Mathf.Min(input.selectionAnchorPosition, input.selectionFocusPosition);
+            int selEnd = Mathf.Max(input.selectionAnchorPosition, input.selectionFocusPosition);
+            bool hasSelection = selEnd > selStart;
 
             if (string.IsNullOrWhiteSpace(text))
             {
+                // 1. 全文起草 (空白)
                 exactMLKey = "article_coldstart";
-                bestType = InterventionType.ArticleGap;
+                bestType = InterventionType.ArticleDraft;
+            }
+            else if (hasSelection)
+            {
+                // 2. 局部润色 (有选中高亮文字)
+                exactMLKey = "article_refine";
+                bestType = InterventionType.ArticleRefine;
             }
             else if (!isFocused)
             {
+                // 3. 全局审稿 (没选中字，且失去焦点没在打字)
                 exactMLKey = "article_reflect";
-                bestType = InterventionType.ArticleReflect;
+                bestType = InterventionType.ArticleReview;
             }
             else if (text.Length - cursorIndex <= 15)
             {
+                // 4. 顺势续写 (光标在末尾)
                 exactMLKey = "article_expand";
-                bestType = InterventionType.ArticleGap;
+                bestType = InterventionType.ArticleExpand;
             }
             else
             {
+                // 5. 内容衔接 (光标在中间)
                 exactMLKey = "article_stitch";
-                bestType = InterventionType.ArticleGap;
+                bestType = InterventionType.ArticleStitch;
             }
 
-            // 直接预测这个精准的 Key，并将文本传进去
-            maxProb = InterventionClassifier.Instance.PredictAcceptanceProbability(exactMLKey, contextStr, totalNodes, selectedNodes, CurrentArticleAction, targetContent);
+            // 获取预测概率 (成文区只取命中条件的唯一目标)
+            maxProb = InterventionClassifier.Instance.PredictAcceptanceProbability(exactMLKey, contextStr, totalNodes, selectedNodes, CurrentArticleAction, "");
         }
+        // =========================================================
+        // 路由 B：画布区 4 大按钮触发逻辑
+        // =========================================================
         else
         {
-            // =========================================================
-            // 画布区：在 3 个候选项中让大脑算一下，谁的概率最高
-            // =========================================================
-            if (isGlobal)
+            string targetContent = selectedNodes > 0 && NodeCardManager.Instance.GetSelectedNodes()[0].Data != null
+                                   ? NodeCardManager.Instance.GetSelectedNodes()[0].Data.Content : "";
+
+            if (isGlobal && totalNodes > 5)
             {
+                // 6. 全局思考 (未选中且节点数>5)
                 exactMLKey = "proactive_global";
-                bestType = InterventionType.Socratic; // 全局借用反思的UI结构来触发
+                bestType = InterventionType.GlobalInsight;
             }
-            else
+            else if (selectedNodes == 1)
             {
+                // 7/8/9. 局部反问/追问/解释 (让机器学习大脑算一下哪个最合适)
                 string[] canvasCandidates = new string[] { "proactive_socratic", "proactive_counter", "proactive_elaborate" };
                 InterventionType[] canvasTypes = new InterventionType[] { InterventionType.Socratic, InterventionType.Counter, InterventionType.Elaborate };
 
                 for (int i = 0; i < canvasCandidates.Length; i++)
                 {
-                    // 传入 targetContent，让模型知道被试者是不是正在打问号！
                     float prob = InterventionClassifier.Instance.PredictAcceptanceProbability(canvasCandidates[i], contextStr, totalNodes, selectedNodes, CurrentArticleAction, targetContent);
                     if (prob > maxProb)
                     {
@@ -330,6 +374,7 @@ public class InterventionTracker : MonoBehaviour
     private void TriggerProactiveBreathing(InterventionType bestType, string recordKey, string contextStr, bool isGlobal)
     {
         _isBreathingActive = true;
+        _currentBreathingDuration = 0f;
         _idleTimer = 0f;
         _lastPredictedRecordKey = recordKey; // 极其重要：记录当前是哪个分类触发了闪烁
 
@@ -338,9 +383,8 @@ public class InterventionTracker : MonoBehaviour
 
         if (contextStr == "Article")
         {
-            _isBreathingActive = false; // 成文区直接空投 UI 提示
             if (ProactiveInterventionSystem.Instance != null)
-                ProactiveInterventionSystem.Instance.TriggerInterventionByType(bestType);
+                ProactiveInterventionSystem.Instance.TriggerInterventionByType(bestType, recordKey);
         }
         else // 画布区
         {
@@ -378,12 +422,14 @@ public class InterventionTracker : MonoBehaviour
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
+        _isAwaitingUserAction = true;
+
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
         key = NormalizeMLKey(key); // 规范化
 
         if (string.IsNullOrEmpty(key)) return; // 拦截幽灵数据
 
-        UpdateProfileRecord(key, -1.0f, +10f); // 假设我们上一版改成了 10f
+        UpdateProfileRecord(key, -1.0f, +10f); 
         Debug.Log($"<color=red>[ML]</color> {key} 遭显性拒绝 (-1.0分)。");
         RecordSingleMLData(key, -1.0f, "Explicit_Reject");
     }
@@ -392,6 +438,7 @@ public class InterventionTracker : MonoBehaviour
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
+        _isAwaitingUserAction = true;
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
         key = NormalizeMLKey(key);
 
@@ -542,6 +589,12 @@ public class InterventionTracker : MonoBehaviour
 
         if (eType.StartsWith("Canvas_") || eType.StartsWith("Article_") || eType.StartsWith("Edit_") || eType.StartsWith("Node_") || eType.StartsWith("Object_"))
         {
+            if (_isBreathingActive)
+            {
+                Debug.Log("<color=yellow>[Tracker]</color> 侦测到用户执行了其他操作，强行打断 AI 闪烁。");
+                AbortLocalBreathing();
+            }
+
             if (_isAwaitingUserAction)
             {
                 Debug.Log("<color=green>[Tracker 解锁]</color> 侦测到用户新动作，解除防挂机锁，重启 AI 观察期！");
@@ -561,6 +614,10 @@ public class InterventionTracker : MonoBehaviour
 
         if (eType == "AI_Intervention_Triggered" && !_isObserving)
         {
+            if (log.TargetID == "Article")
+            {
+                return;
+            }
             StartObservation(log);
             return;
         }
@@ -689,12 +746,26 @@ public class InterventionTracker : MonoBehaviour
             GlobalProactiveButton.Instance.StopBreathingEarly();
         }
 
+        if (CopilotActionController.Instance != null && CopilotActionController.Instance.IsAnyButtonGlowing)
+        {
+            CopilotActionController.Instance.StopGlowEffect();
+        }
+
         _isBreathingActive = false;
         _idleTimer = 0f;
 
         _isAwaitingUserAction = true;
 
-        OnInterventionIgnored(_lastPredictedRecordKey);
+        if (_currentBreathingDuration < 3.0f)
+        {
+            Debug.Log($"<color=white>[Tracker]</color> AI闪烁仅 {_currentBreathingDuration:F1}s 就被打断，属于【动作撞车】。静默取消，不扣分。");
+            _lastPredictedRecordKey = "";
+        }
+        else
+        {
+            Debug.Log($"<color=yellow>[Tracker]</color> AI闪烁 {_currentBreathingDuration:F1}s 后被用户主动操作打断，判定为无视。");
+            OnInterventionIgnored(_lastPredictedRecordKey);
+        }
     }
 
     public void SetLastPredictedRecordKey(string explicitKey)
@@ -702,9 +773,6 @@ public class InterventionTracker : MonoBehaviour
         _lastPredictedRecordKey = NormalizeMLKey(explicitKey);
     }
 
-    // =========================================================
-    // 【核心修复 2：数据规范化漏斗】解决键值分裂与大小写不一致
-    // =========================================================
     private string NormalizeMLKey(string rawKey)
     {
         if (string.IsNullOrEmpty(rawKey)) return "";

@@ -42,29 +42,36 @@ public class ProactiveInterventionSystem : MonoBehaviour
     // ==========================================
     // 核心接口：被 UI 或 Tracker 呼叫
     // ==========================================
-    public void TriggerInterventionByType(InterventionType type)
+    public void TriggerInterventionByType(InterventionType type, string mlKey = "")
     {
         if (type == InterventionType.None) return;
-        // 成文区专属路由
-        if (type == InterventionType.ArticleGap || type == InterventionType.ArticleReflect)
+
+        // 【核心修改】：精准包含成文区的 5 个大类枚举！
+        if (type == InterventionType.ArticleDraft ||
+            type == InterventionType.ArticleRefine ||
+            type == InterventionType.ArticleExpand ||
+            type == InterventionType.ArticleStitch ||
+            type == InterventionType.ArticleReview)
         {
-            GenerateArticleIntervention(type);
+            GenerateArticleIntervention(type, null, 1, mlKey);
             return;
         }
 
-        // 导图区路由
+        // ================== 画布区路由 ==================
         var selectedNodes = NodeCardManager.Instance.GetSelectedNodes();
         if (selectedNodes.Count == 1)
         {
+            // Socratic, Counter, Elaborate 走到这里
             GenerateLocalNodeIntervention(selectedNodes[0], type);
         }
-        else if (selectedNodes.Count == 0) // 【核心修复：增加全局节点分支】
+        else if (selectedNodes.Count == 0 && type == InterventionType.GlobalInsight)
         {
+            // GlobalInsight 走到这里
             GenerateGlobalNodeIntervention(type);
         }
         else
         {
-            Debug.LogWarning("[生成器] 选中了多个节点，目前 AI 仅支持单节点或全局生成。");
+            Debug.LogWarning("[生成器] 选中了多个节点或未满足触发条件。");
         }
     }
 
@@ -239,7 +246,7 @@ public class ProactiveInterventionSystem : MonoBehaviour
     // ==========================================
     // 逻辑 2：成文区生成柔和提示
     // ==========================================
-    private void GenerateArticleIntervention(InterventionType type, BaseNodeController contextNode = null, int stage = 1)
+    private void GenerateArticleIntervention(InterventionType type, BaseNodeController contextNode = null, int stage = 1, string mlKey = "")
     {
         // 1. 检查成文区是否打开，未打开则不介入
         if (ArticleGenerator.Instance == null || !ArticleGenerator.Instance.articleModal.activeSelf) return;
@@ -257,7 +264,8 @@ public class ProactiveInterventionSystem : MonoBehaviour
         // 3. 极其轻量级的调用：不再请求大模型，直接让 Copilot 中枢智能闪烁对应的按钮！
         if (CopilotActionController.Instance != null)
         {
-            CopilotActionController.Instance.TriggerProactiveGlow();
+            // 【核心接力】：将 Tracker 预测出的精准 mlKey 传递给 Copilot，告诉它具体该闪烁哪个按钮！
+            CopilotActionController.Instance.TriggerProactiveGlow(mlKey);
         }
 
         // 4. 埋点记录，保留数据科学管线的完整性

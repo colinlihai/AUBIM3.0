@@ -4,23 +4,28 @@ using UnityEngine.EventSystems;
 using System.Collections;
 
 [RequireComponent(typeof(Button))]
+[RequireComponent(typeof(Image))]
 public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
 {
     public static GlobalProactiveButton Instance;
 
     private Button _btn;
     private Image _btnImage;
+    private LayoutElement _layoutElement;
     private Coroutine _breathCoroutine;
 
     [Header("状态监控")]
     public bool isBreathing = false;
     private InterventionType _pendingType;
     private bool _isHovering = false;
+    private bool _isVisible = true;
 
-    // 视觉配置
-    private Color normalColor = new Color(1f, 1f, 1f, 0.2f); // 幽灵态（透明度0.2）
-    private Color hoverColor = new Color(0.3f, 0.3f, 0.3f, 1f);    // 鼠标悬停态（完全不透明的纯白）
-    private Color glowColor = new Color(1f, 0.8f, 0.2f, 1f); // 闪烁时的耀眼金色
+    // ==========================================
+    // 视觉配置 (去除了半透明幽灵态，改为标准实心UI)
+    // ==========================================
+    private Color normalColor = new Color(0.4f, 0.4f, 0.4f, 1f); 
+    private Color hoverColor = new Color(0.3f, 0.3f, 0.3f, 1f);  // 悬停态：微微变暗
+    private Color glowColor = new Color(1f, 0.8f, 0.2f, 1f);     // 闪烁时：耀眼金色
 
     void Awake()
     {
@@ -29,7 +34,65 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
         _btnImage = GetComponent<Image>();
         _btnImage.color = normalColor;
 
+        // 自动获取或添加 LayoutElement，这是在 VerticalLayoutGroup 中动态折叠隐藏的神器
+        _layoutElement = GetComponent<LayoutElement>();
+        if (_layoutElement == null) _layoutElement = gameObject.AddComponent<LayoutElement>();
+
         _btn.onClick.AddListener(OnButtonClicked);
+    }
+
+    void Update()
+    {
+        // ==========================================
+        // 动态监控画布节点数量，大于 5 个才显示这个按钮
+        // ==========================================
+        if (NodeCardManager.Instance != null)
+        {
+            int nodeCount = NodeCardManager.Instance.GetAllNodes().Count;
+            bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+
+            // 只有当“成文区未打开”且“节点大于5个”时，全局思考按钮才显示！
+            bool shouldShow = !isArticleActive && nodeCount > 5;
+
+            if (_isVisible != shouldShow)
+            {
+                SetVisibility(shouldShow);
+            }
+        }
+
+        // 【新增】：平滑的悬停变色逻辑 (与成文区按钮保持完美的视觉统一)
+        if (_isVisible && !isBreathing)
+        {
+            Color targetColor = _isHovering ? hoverColor : normalColor;
+            _btnImage.color = Color.Lerp(_btnImage.color, targetColor, Time.deltaTime * 10f);
+        }
+    }
+
+    /// <summary>
+    /// 控制按钮在 LayoutGroup 中的智能显隐
+    /// </summary>
+    private void SetVisibility(bool show)
+    {
+        _isVisible = show;
+
+        // 核心：控制 LayoutElement 忽略排版，这样它就会在 LayoutGroup 中自动折叠，完全不占空间
+        if (_layoutElement != null) _layoutElement.ignoreLayout = !show;
+
+        // 关闭 Image 和 Button 组件使其不可见且不可交互
+        _btnImage.enabled = show;
+        _btn.enabled = show;
+
+        // 关闭它下面的文字、图标等子物体
+        foreach (Transform child in transform)
+        {
+            child.gameObject.SetActive(show);
+        }
+
+        // 如果被隐藏了，强制打断可能正在进行的闪烁
+        if (!show && isBreathing)
+        {
+            StopBreathingEarly();
+        }
     }
 
     // ==========================================
@@ -37,8 +100,9 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
     // ==========================================
     public void OnPointerEnter(PointerEventData eventData)
     {
+        if (!_isVisible) return; // 隐藏状态下不响应
+
         _isHovering = true;
-        // 如果不在闪烁状态，立刻恢复不透明
         if (!isBreathing)
         {
             _btnImage.color = hoverColor;
@@ -47,8 +111,9 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
 
     public void OnPointerExit(PointerEventData eventData)
     {
+        if (!_isVisible) return;
+
         _isHovering = false;
-        // 如果不在闪烁状态，恢复半透明幽灵态
         if (!isBreathing)
         {
             _btnImage.color = normalColor;
@@ -56,11 +121,11 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
     }
 
     // ==========================================
-    // 供 InterventionTracker (发呆计时器) 呼叫
+    // 供 InterventionTracker (大脑) 呼叫
     // ==========================================
     public void StartGlobalBreathing(InterventionType type)
     {
-        if (isBreathing) return;
+        if (isBreathing || !_isVisible) return; // 隐藏状态下严禁闪烁！
 
         isBreathing = true;
         _pendingType = type;
@@ -70,7 +135,6 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
         Debug.Log($"<color=yellow>[AI 介入]</color> 全局反思按钮开始闪烁，限时 10 秒等待采纳...");
     }
 
-    // 供 InterventionTracker 打断时呼叫
     public void StopBreathingEarly()
     {
         if (isBreathing)
@@ -78,7 +142,6 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
             isBreathing = false;
             if (_breathCoroutine != null) StopCoroutine(_breathCoroutine);
 
-            // 熄灭时，如果鼠标还停在上面就保持白实心，否则变回半透明
             _btnImage.color = _isHovering ? hoverColor : normalColor;
         }
     }
@@ -120,14 +183,14 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
     }
 
     // ==========================================
-    // 核心修改：带 10 秒超时检测的呼吸协程
+    // 带 10 秒超时检测的呼吸协程
     // ==========================================
     private IEnumerator BreathRoutine()
     {
         float timer = 0f;
         float elapsed = 0f;
 
-        // 【新增 10 秒存活判定】：只有在 10 秒内才保持呼吸
+        // 10 秒存活判定
         while (isBreathing && elapsed < 10f)
         {
             timer += Time.deltaTime * 2f;
@@ -135,23 +198,21 @@ public class GlobalProactiveButton : MonoBehaviour, IPointerEnterHandler, IPoint
 
             float lerp = (Mathf.Sin(timer) + 1f) / 2f;
 
-            // 细节优化：如果呼吸时鼠标悬停在上面，底色用纯白而不是半透明，混合金色效果更好
             Color baseColor = _isHovering ? hoverColor : normalColor;
             _btnImage.color = Color.Lerp(baseColor, glowColor, lerp);
 
             yield return null;
         }
 
-        // 如果 10 秒走完，且 isBreathing 依然为 true（即没有被点击，也没有被用户打断）
+        // 如果 10 秒走完，依然没有被点击或打断
         if (isBreathing)
         {
             isBreathing = false;
             _btnImage.color = _isHovering ? hoverColor : normalColor;
 
-            // 【向 ML 模型汇报】：用户彻底无视了这次长达 10 秒的呼唤
+            // 【向 ML 模型汇报】：用户无视了呼唤
             if (InterventionTracker.Instance != null)
             {
-                // 这将触发扣除 0.2 分，并增加容忍度，同时解除 Tracker 的静默锁
                 InterventionTracker.Instance.OnInterventionIgnored(_pendingType.ToString());
             }
 

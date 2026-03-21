@@ -86,6 +86,13 @@ public class ChatSuggestionManager : MonoBehaviour
     {
         // 清理上一波残留
         ClearAllChips();
+
+        if (suggestions == null || suggestions.Count == 0)
+        {
+            Debug.LogWarning("<color=red>[Chat Suggestion]</color> 接收到的逼问列表为空，终止生命周期！");
+            return;
+        }
+
         if (suggestions == null || suggestions.Count == 0) return;
 
         if (InterventionClassifier.Instance != null && NodeCardManager.Instance != null)
@@ -110,8 +117,10 @@ public class ChatSuggestionManager : MonoBehaviour
 
     private IEnumerator LifecycleRoutine(int wordCount, List<SuggestionData> suggestions)
     {
-        // 1. 根据字数动态计算等待时间 (5 ~ 15秒)
-        float baseWaitTime = Mathf.Clamp(wordCount / 12f, 5f, 80f);
+        float baseWaitTime = wordCount <= 100 ? wordCount / 10f : 10f + (wordCount - 100) * 0.03f;
+
+        // 无论字数多长，基础等待时间被硬性约束在 5秒 ~ 30秒 之间
+        baseWaitTime = Mathf.Clamp(baseWaitTime, 5f, 30f);
         float tolerance = 0f;
         if (InterventionTracker.Instance != null)
         {

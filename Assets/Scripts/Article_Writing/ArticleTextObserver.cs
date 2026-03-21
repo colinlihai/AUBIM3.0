@@ -43,7 +43,7 @@ public class ArticleTextObserver : MonoBehaviour
             ArticleGenerator.Instance.mainBodyInput.onValueChanged.AddListener(OnMainBodyTextChanged);
 
             // 初始化广播一次当前状态
-            CheckWordCountAndEmptyState(_lastMainBodyText);
+            CheckWordCountAndEmptyState(_lastMainBodyText, true);
         }
     }
 
@@ -120,10 +120,10 @@ public class ArticleTextObserver : MonoBehaviour
         _lastMainBodyText = newText;
     }
 
-    private void CheckWordCountAndEmptyState(string text)
+    private void CheckWordCountAndEmptyState(string text, bool forceBroadcast = false)
     {
         bool hasText = !string.IsNullOrWhiteSpace(text);
-        if (hasText != _lastHasText)
+        if (hasText != _lastHasText || forceBroadcast)
         {
             _lastHasText = hasText;
             OnTextEmptyStateChanged?.Invoke(hasText);
@@ -131,7 +131,7 @@ public class ArticleTextObserver : MonoBehaviour
 
         // 计算当前有效字数 (排除了纯空格的回车)
         int wordCount = string.IsNullOrWhiteSpace(text) ? 0 : text.Replace(" ", "").Replace("\n", "").Length;
-        if (wordCount != _lastWordCount)
+        if (wordCount != _lastWordCount || forceBroadcast)
         {
             _lastWordCount = wordCount;
             OnWordCountChanged?.Invoke(wordCount);
@@ -143,7 +143,20 @@ public class ArticleTextObserver : MonoBehaviour
     // ==========================================
     public void SyncHistoricalText(string text)
     {
-        _lastMainBodyText = text ?? "";
+        string safeText = text ?? "";
+        _lastMainBodyText = safeText;
+
+        // 1. 强行广播文本是否存在，以此激活隐藏的“顺势续写”、“内容衔接”按钮
+        CheckWordCountAndEmptyState(safeText, true);
+
+        // 2. 强行清空可能残留的选区状态（确保“局部润色”等状态干净）
+        _lastSelectionStart = -1;
+        _lastSelectionEnd = -1;
+        OnSelectionChanged?.Invoke(false, "");
+
+        // 3. 强行重置光标到末尾
+        _lastCaretPos = -1;
+        BroadcastCaretContext(safeText, safeText.Length);
     }
 
     private void TrackTelemetry(string newText)

@@ -14,7 +14,7 @@ public class CognitiveSupportSystem : MonoBehaviour
     public Camera uiCamera;
 
     [Tooltip("距离节点顶部的偏移量 (像素)")]
-    public float verticalOffset = 20f;
+    public float verticalOffset = 10f;
     public bool scaleWithZoom = false;
 
     // --- 优化点1：缓存目标引用，避免每帧 GetComponent ---

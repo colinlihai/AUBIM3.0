@@ -19,6 +19,7 @@ public class ArticleGenerator : MonoBehaviour
 
     [Header("UI - Header 区域")]
     public Button exportBtn;
+    public Button extractBtn;
 
     [Header("UI - 纯净正文区 (全屏独占)")]
     public TMP_InputField mainBodyInput;
@@ -49,6 +50,7 @@ public class ArticleGenerator : MonoBehaviour
         if (openBtn != null) openBtn.onClick.AddListener(OnOpenModal);
         if (closeBtn != null) closeBtn.onClick.AddListener(CloseModal);
         if (exportBtn != null) exportBtn.onClick.AddListener(ExportToTxt);
+        if (extractBtn != null) extractBtn.onClick.AddListener(OnExtractToMapClicked);
 
         if (articleModal != null) articleModal.SetActive(false);
     }
@@ -61,6 +63,78 @@ public class ArticleGenerator : MonoBehaviour
             lastKnownCaretPosition = mainBodyInput.selectionFocusPosition;
             cachedSelectionStart = Mathf.Min(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
             cachedSelectionEnd = Mathf.Max(mainBodyInput.selectionAnchorPosition, mainBodyInput.selectionFocusPosition);
+        }
+    }
+
+    // ==========================================
+    // 【新增核心功能】：逆向提纲提取 (文章 -> 思维导图)
+    // ==========================================
+    private void OnExtractToMapClicked()
+    {
+        if (mainBodyInput == null) return;
+        string articleText = mainBodyInput.text;
+
+        if (string.IsNullOrWhiteSpace(articleText))
+        {
+            if (ToastSystem.Instance != null) ToastSystem.Instance.Show("正文为空，无法生成导图");
+            return;
+        }
+
+        // 检查字数，如果太少，提纲没意义
+        if (articleText.Length < 50)
+        {
+            if (ToastSystem.Instance != null) ToastSystem.Instance.Show("文章字数太少，请多写一点再生成");
+            return;
+        }
+
+        if (ToastSystem.Instance != null) ToastSystem.Instance.Show("AI 正在逆向抽离文章大纲...");
+
+        // 【埋点记录】：极高价值的逆向工程意图记录
+        if (UserBehaviorSystem.Instance != null)
+        {
+            UserBehaviorSystem.Instance.LogEvent(
+                BehaviorEventType.AI_Intervention_Triggered,
+                targetID: "ArticleModal",
+                info: "ExtractToMap",
+                value: articleText.Length
+            );
+        }
+
+        // 计算一个好看的生成位置（屏幕中心映射到画布局部坐标）
+        Vector2 centerPos = Vector2.zero;
+        if (NodeCardManager.Instance != null && NodeCardManager.Instance.cardContainer != null)
+        {
+            RectTransform containerRect = NodeCardManager.Instance.cardContainer.GetComponent<RectTransform>();
+            Canvas parentCanvas = containerRect.GetComponentInParent<Canvas>();
+            Camera uiCam = (parentCanvas != null && parentCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? parentCanvas.worldCamera : null;
+            Vector2 screenCenter = new Vector2(Screen.width / 2f, Screen.height / 2f);
+
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(containerRect, screenCenter, uiCam, out Vector2 localCenter))
+            {
+                centerPos = localCenter;
+            }
+        }
+
+        // 呼叫 AITaskAssistant 处理大模型请求与解析
+        if (AITaskAssistant.Instance != null)
+        {
+            AITaskAssistant.Instance.ExtractArticleToTreeData(articleText, (treeData) =>
+            {
+                if (treeData != null && NodeCardManager.Instance != null)
+                {
+                    // 完美复用画布的递归建树管线！
+                    NodeCardManager.Instance.BuildTreeFromAIData(treeData, centerPos);
+
+                    if (ToastSystem.Instance != null) ToastSystem.Instance.Show("文章大纲已生成至画布！");
+
+                    // 【体验优化】：生成完成后，把成文区关掉，让用户直观地看到背后生成的这棵巨大结构树！
+                    CloseModal();
+                }
+                else
+                {
+                    if (ToastSystem.Instance != null) ToastSystem.Instance.Show("结构抽离失败，请稍后再试");
+                }
+            });
         }
     }
 

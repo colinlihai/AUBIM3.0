@@ -31,7 +31,11 @@ public class CopilotActionController : MonoBehaviour
 
     private GameObject _currentlyGlowingBtn = null;
 
-    private string _lastQuotedText = ""; // 防抖：记录上次生成的气泡内容
+    private string _proactiveSourceEvent = "";
+
+    private AIChatManager.ChatBubbleTracker _pendingQuoteBubble;
+    private string _lastQuotedText = "";
+    private Coroutine _quoteCoroutine;
 
     private bool _isModalOpen = false;
 
@@ -39,7 +43,7 @@ public class CopilotActionController : MonoBehaviour
     private ToolMode _currentMode = ToolMode.None;
 
     // 缓存按钮的原始颜色，用于复原
-    private Color _btnOriginalColor = Color.white;
+    private Color _btnOriginalColor = new Color(0.4f, 0.4f, 0.4f, 1f); // 浅灰
     private Color _colorYellow = new Color(1f, 0.8f, 0.2f, 1f); // 待命黄
     private Color _colorGreen = new Color(0.3f, 0.8f, 0.3f, 1f);  // 执行绿
 
@@ -105,6 +109,22 @@ public class CopilotActionController : MonoBehaviour
         {
             ArticleGenerator.Instance.OnNodeDroppedEvent -= HandleNodeDroppedEvent;
         }
+    }
+
+    public bool IsButtonCurrentlyGlowing(GameObject btnObj)
+    {
+        return _currentlyGlowingBtn != null && _currentlyGlowingBtn == btnObj;
+    }
+
+    public bool IsButtonActiveTool(GameObject btnObj)
+    {
+        if (_currentMode == ToolMode.RefineWaiting && btnObj == btnLocalRefine) return true;
+        if (_currentMode == ToolMode.ExpandWaiting && btnObj == btnContextExpand) return true;
+        if (_currentMode == ToolMode.TransitionWaiting && btnObj == btnContextTransition) return true;
+        if (_currentMode == ToolMode.ReviewWaiting && btnObj == btnGlobalReview) return true;
+        if (_currentMode == ToolMode.DraftWaiting && btnObj == btnGlobalDraft) return true;
+
+        return false; // 对于“打开成文区”这类非工具按钮，永远返回 false 即可正常变色
     }
 
     // ==========================================
@@ -187,6 +207,16 @@ public class CopilotActionController : MonoBehaviour
         TryGenerateQuoteBubble();
     }
 
+    private void ClearPendingQuoteBubble()
+    {
+        if (_pendingQuoteBubble != null && AIChatManager.Instance != null)
+        {
+            AIChatManager.Instance.RemoveSpecificBubble(_pendingQuoteBubble);
+        }
+        _pendingQuoteBubble = null;
+        _lastQuotedText = "";
+    }
+
     public void TryGenerateQuoteBubble()
     {
         if (!_isModalOpen) return;
@@ -199,25 +229,44 @@ public class CopilotActionController : MonoBehaviour
         }
         else if (_hasText && _currentMode == ToolMode.ExpandWaiting)
         {
-            // 【核心修改】：顺势续写不再限制位置，无论光标在哪，永远只取上文作为续写基石
             quoteToGenerate = $"你要续写的前文为：\n...{_contextBefore}";
         }
         else if (_hasText && _currentMode == ToolMode.TransitionWaiting)
         {
-            // 【核心修改】：内容衔接最好在中间。如果用户非要在末尾点内容衔接，依然给出兼容提示
+            // 内容衔接最好在中间。如果用户非要在末尾点内容衔接，依然给出兼容提示
             if (_isCaretInMiddle)
                 quoteToGenerate = $"你要关联的上下文为：\n...{_contextBefore} | {_contextAfter}...";
             else
                 quoteToGenerate = $"你要关联的上下文为：\n...{_contextBefore} | [文章末尾无下文]";
         }
 
-        if (string.IsNullOrWhiteSpace(quoteToGenerate) || quoteToGenerate == _lastQuotedText) return;
+        if (string.IsNullOrWhiteSpace(quoteToGenerate)) return;
 
-        _lastQuotedText = quoteToGenerate;
+        // 掐断之前正在等待的协程，开启新的防抖等待
+        if (_quoteCoroutine != null) StopCoroutine(_quoteCoroutine);
+        _quoteCoroutine = StartCoroutine(WaitMouseUpAndGenerate(quoteToGenerate));
+    }
+
+    private IEnumerator WaitMouseUpAndGenerate(string textToQuote)
+    {
+        // 只要鼠标左键还在按着（用户还在拖拽调整选区），就一直挂起不执行！
+        while (Input.GetMouseButton(0))
+        {
+            yield return null;
+        }
+
+        // 鼠标松开后，检查内容是否和上次一模一样，如果一样就不重复生成
+        if (textToQuote == _lastQuotedText) yield break;
+
+        // 【气泡替换核心】：在生成新气泡前，先销毁上一次未确认的旧气泡，保证聊天区干净
+        ClearPendingQuoteBubble();
+
+        _lastQuotedText = textToQuote;
 
         if (AIChatManager.Instance != null)
         {
-            AIChatManager.Instance.AddContextQuoteBubble(quoteToGenerate, true);
+            // 生成气泡并记录追踪凭证 (建议此处传 false，因为还没确认提交，先不污染大模型记忆)
+            _pendingQuoteBubble = AIChatManager.Instance.AddContextQuoteBubble(textToQuote, false);
 
             if (_currentMode != ToolMode.None)
             {
@@ -231,7 +280,10 @@ public class CopilotActionController : MonoBehaviour
     // ==========================================
     private void ResetToolMode()
     {
+        ClearPendingQuoteBubble();
+
         _currentMode = ToolMode.None;
+        _proactiveSourceEvent = "";
         _lastQuotedText = ""; // 允许下次重新生成气泡
 
         if (AIChatManager.Instance != null) AIChatManager.Instance.StopChatInputGlow();
@@ -268,31 +320,66 @@ public class CopilotActionController : MonoBehaviour
     /// </summary>
     public bool TryInterceptChatSubmit(string userPrompt)
     {
-        if (_currentMode == ToolMode.RefineWaiting)
+        if (_currentMode == ToolMode.None) return false;
+        string cleanPrompt = userPrompt != null ? userPrompt.Trim() : "";
+        // ========================================================
+        // 【ML 漏斗阶段 3 & 4：终极转化结算！】
+        // ========================================================
+        if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
         {
-            ExecuteRefine(userPrompt);
-            return true;
+            if (string.IsNullOrWhiteSpace(cleanPrompt))
+            {
+                // 没打字，直接回车
+                InterventionTracker.Instance.OnImplicitScaffoldAccepted(_proactiveSourceEvent);
+                Debug.Log($"<color=green>[ML]</color> 用户留空回车，采纳了 {_proactiveSourceEvent} 的默认提示词。记录隐性脚手架采纳 (+0.5)");
+            }
+            else
+            {
+                // 打了字，加了额外要求
+                InterventionTracker.Instance.OnCoCreationAccepted(_proactiveSourceEvent);
+                Debug.Log($"<color=cyan>[ML]</color> 用户补充了指令 '{cleanPrompt}'，发生了深度的 {_proactiveSourceEvent}！记录深度共创 (+1.5)");
+            }
         }
-        else if (_currentMode == ToolMode.ExpandWaiting)
+
+        if (!string.IsNullOrWhiteSpace(cleanPrompt))
         {
-            ExecuteExpand(userPrompt);
-            return true;
+            if (_currentMode == ToolMode.RefineWaiting || _currentMode == ToolMode.ExpandWaiting || _currentMode == ToolMode.TransitionWaiting)
+            {
+                // 有引用气泡的三剑客：直接将文字追加入气泡尾部
+                if (_pendingQuoteBubble != null && AIChatManager.Instance != null)
+                {
+                    AIChatManager.Instance.AppendTextToBubble(_pendingQuoteBubble, cleanPrompt);
+                }
+            }
+            else if (_currentMode == ToolMode.DraftWaiting || _currentMode == ToolMode.ReviewWaiting)
+            {
+                // 全文起草 / 全局审阅：生成带功能前缀的独立气泡
+                if (AIChatManager.Instance != null)
+                {
+                    string actionName = _currentMode == ToolMode.ReviewWaiting ? "审稿意见" : "全文起草";
+
+                    // UI 上显示的带颜色富文本，例如：[全文起草]：用诙谐的语气
+                    string displayPrompt = $"<color=#00e5ff><b>[{actionName}]：</b></color> {cleanPrompt}";
+
+                    // 存入大模型上下文的纯净文本（带上前缀也有助于大模型理解上下文）
+                    string historyPrompt = $"[{actionName}] {cleanPrompt}";
+
+                    AIChatManager.Instance.AddStandardUserBubble(displayPrompt, historyPrompt, true);
+                }
+            }
         }
-        else if (_currentMode == ToolMode.TransitionWaiting)
-        {
-            ExecuteTransition(userPrompt);
-            return true;
-        }
-        else if (_currentMode == ToolMode.ReviewWaiting)
-        {
-            ExecuteReview(userPrompt);
-            return true;
-        }
-        else if (_currentMode == ToolMode.DraftWaiting)
-        { 
-            ExecuteDraft(userPrompt); return true; 
-        }
-        return false; // 没拦截，正常聊天
+
+        _pendingQuoteBubble = null;
+        _lastQuotedText = "";
+
+        // 执行具体的功能，Execute 方法执行完后，它们内部会自动调用 ResetToolMode()，从而清空追踪器。
+        if (_currentMode == ToolMode.RefineWaiting) ExecuteRefine(userPrompt);
+        else if (_currentMode == ToolMode.ExpandWaiting) ExecuteExpand(userPrompt);
+        else if (_currentMode == ToolMode.TransitionWaiting) ExecuteTransition(userPrompt);
+        else if (_currentMode == ToolMode.ReviewWaiting) ExecuteReview(userPrompt);
+        else if (_currentMode == ToolMode.DraftWaiting) ExecuteDraft(userPrompt); // 或者是 GlobalDraftWaiting，以你实际的枚举名称为准
+
+        return true;
     }
 
     // ==========================================
@@ -401,40 +488,28 @@ public class CopilotActionController : MonoBehaviour
         });
     }
 
-    // ==========================================
-    // 工具执行引擎：支持回调自定义处理结果
-    // ==========================================
-    private string GetUserInput()
-    {
-        if (AIChatManager.Instance == null || AIChatManager.Instance.chatInput == null) return "";
-        string txt = AIChatManager.Instance.chatInput.text;
-        AIChatManager.Instance.chatInput.text = "";
-        return txt;
-    }
-
-    // 【新增 userOriginalRequest 参数和 remember 参数】
     private void ExecuteToolPrompt(string finalPrompt, string eventName, bool remember, string userOriginalRequest = "", System.Action<bool, string> customCallback = null)
     {
-        // 【ML 闭环极简判断】：是否有用户主动输入的自定义 Prompt
+        // 1. 设置 AI 工作状态锁定 (保留：因为无论是手动还是被动，只要 AI 在跑，就得锁定界面防抖)
         if (InterventionTracker.Instance != null)
         {
             InterventionTracker.Instance.SetAIProcessing(true);
-
-            if (string.IsNullOrWhiteSpace(userOriginalRequest))
-                InterventionTracker.Instance.OnImplicitScaffoldAccepted(eventName); // 没打字，+0.5
-            else
-                InterventionTracker.Instance.OnCoCreationAccepted(eventName);      // 打字了，+1.5
         }
 
-        if (UserBehaviorSystem.Instance != null) UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Local, "Copilot", eventName, 1);
+        // 2. 基础遥测埋点 (保留：这只是用来记录用户用了什么功能，不影响 AI 的 ML 评分)
+        if (UserBehaviorSystem.Instance != null)
+            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Local, "Copilot", eventName, 1);
 
+        // 3. 存入聊天历史记忆
         if (remember && !string.IsNullOrWhiteSpace(userOriginalRequest) && LLMManager.Instance != null)
         {
             LLMManager.Instance.AddToHistory("user", userOriginalRequest);
         }
 
+        // 4. 调用大模型发起请求
         LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
         {
+            // 释放 AI 工作状态
             if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
 
             if (customCallback != null)
@@ -443,64 +518,78 @@ public class CopilotActionController : MonoBehaviour
             }
             else
             {
-                AIChatManager.Instance.AddSystemAIBubble(success ? response : $"[执行失败: {response}]", remember);
+                if (AIChatManager.Instance != null)
+                    AIChatManager.Instance.AddSystemAIBubble(success ? response : $"[执行失败: {response}]", remember);
             }
         });
     }
 
     // ==========================================
-    // 5 大按钮功能实现
+    // 5 大按钮功能实现 (完美对接 ML 漏斗与 UI 呼吸灯)
     // ==========================================
     private void OnLocalRefineClicked()
     {
+        bool wasGlowing = false;
+
         if (_currentlyGlowingBtn == btnLocalRefine)
         {
-            var glow = _currentlyGlowingBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StopGlow();
-            _currentlyGlowingBtn = null;
+            // 【核心修复 1】：使用内部强力熄灭方法，彻底废弃 AINodeGlowEffect
+            StopGlowEffect();
+            wasGlowing = true;
+
+            // 【核心修复 2】：记录 ML 漏斗第一步 —— 成功吸引点击 (+1.0分)
+            if (InterventionTracker.Instance != null)
+                InterventionTracker.Instance.OnButtonClicked("article_refine");
         }
 
-        // 【ML 闭环】：二次点击取消黄色状态，意味着 "-1.0 强拒绝"
-        if (_currentMode == ToolMode.ExpandWaiting)
+        if (_currentMode == ToolMode.RefineWaiting)
         {
-            if (InterventionTracker.Instance != null)
-                InterventionTracker.Instance.OnInterventionRejected("article_refine");
+            if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionRejected(_proactiveSourceEvent);
+                Debug.Log($"<color=orange>[ML]</color> 用户在考虑后放弃了 {_proactiveSourceEvent}，记录显性拒绝 (-1.0)");
+            }
 
             ResetToolMode();
             return;
         }
 
         ResetToolMode();
-        _currentMode = ToolMode.ExpandWaiting;
-
-        btnContextExpand.GetComponent<Image>().color = _colorYellow;
-        btnContextExpand.GetComponentInChildren<TMP_Text>().text = "请选取并输入...";
+        _currentMode = ToolMode.RefineWaiting;
+        _proactiveSourceEvent = wasGlowing ? "article_refine" : "";
+        btnLocalRefine.GetComponent<Image>().color = _colorYellow;
+        btnLocalRefine.GetComponentInChildren<TMP_Text>().text = "请选取并输入...";
 
         TryGenerateQuoteBubble();
     }
 
     private void OnContextExpandClicked()
     {
-        // 消除发光状态
-        if (_currentlyGlowingBtn == btnContextExpand) {
-            var glow = _currentlyGlowingBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StopGlow();
-            _currentlyGlowingBtn = null;
+        bool wasGlowing = false;
+
+        if (_currentlyGlowingBtn == btnContextExpand)
+        {
+            StopGlowEffect();
+            wasGlowing = true;
+
+            if (InterventionTracker.Instance != null)
+                InterventionTracker.Instance.OnButtonClicked("article_expand");
         }
 
-        // 【ML 闭环】：二次点击取消黄色状态，意味着 "-1.0 强拒绝"
-        if (_currentMode == ToolMode.ExpandWaiting) 
+        if (_currentMode == ToolMode.ExpandWaiting)
         {
-            if (InterventionTracker.Instance != null) 
-                InterventionTracker.Instance.OnInterventionRejected("article_expand");
-                
+            if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionRejected(_proactiveSourceEvent);
+                Debug.Log($"<color=orange>[ML]</color> 用户在考虑后放弃了 {_proactiveSourceEvent}，记录显性拒绝 (-1.0)");
+            }
             ResetToolMode();
             return;
         }
 
-        ResetToolMode(); 
+        ResetToolMode();
         _currentMode = ToolMode.ExpandWaiting;
-        
+        _proactiveSourceEvent = wasGlowing ? "article_expand" : "";
         btnContextExpand.GetComponent<Image>().color = _colorYellow;
         btnContextExpand.GetComponentInChildren<TMP_Text>().text = "请定位并输入...";
 
@@ -509,43 +598,64 @@ public class CopilotActionController : MonoBehaviour
 
     private void OnContextTransitionClicked()
     {
+        bool wasGlowing = false;
+
         if (_currentlyGlowingBtn == btnContextTransition)
         {
-            var glow = _currentlyGlowingBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StopGlow();
-            _currentlyGlowingBtn = null;
+            StopGlowEffect();
+            wasGlowing = true;
+
+            if (InterventionTracker.Instance != null)
+                InterventionTracker.Instance.OnButtonClicked("article_stitch");
         }
 
-        // 【ML 闭环】：二次点击取消黄色状态，意味着 "-1.0 强拒绝"
-        if (_currentMode == ToolMode.ExpandWaiting)
+        if (_currentMode == ToolMode.TransitionWaiting)
         {
-            if (InterventionTracker.Instance != null)
-                InterventionTracker.Instance.OnInterventionRejected("article_stitch");
-
+            if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionRejected(_proactiveSourceEvent);
+                Debug.Log($"<color=orange>[ML]</color> 用户在考虑后放弃了 {_proactiveSourceEvent}，记录显性拒绝 (-1.0)");
+            }
             ResetToolMode();
             return;
         }
 
         ResetToolMode();
-        _currentMode = ToolMode.ExpandWaiting;
-
-        btnContextExpand.GetComponent<Image>().color = _colorYellow;
-        btnContextExpand.GetComponentInChildren<TMP_Text>().text = "请定位并输入...";
+        _currentMode = ToolMode.TransitionWaiting;
+        _proactiveSourceEvent = wasGlowing ? "article_stitch" : "";
+        btnContextTransition.GetComponent<Image>().color = _colorYellow;
+        btnContextTransition.GetComponentInChildren<TMP_Text>().text = "请定位并输入...";
 
         TryGenerateQuoteBubble();
     }
 
     private void OnGlobalReviewClicked()
     {
+        bool wasGlowing = false;
+
+        if (_currentlyGlowingBtn == btnGlobalReview)
+        {
+            StopGlowEffect();
+            wasGlowing = true;
+
+            if (InterventionTracker.Instance != null)
+                InterventionTracker.Instance.OnButtonClicked("article_reflect");
+        }
+
         if (_currentMode == ToolMode.ReviewWaiting)
         {
+            if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionRejected(_proactiveSourceEvent);
+                Debug.Log($"<color=orange>[ML]</color> 用户在考虑后放弃了 {_proactiveSourceEvent}，记录显性拒绝 (-1.0)");
+            }
             ResetToolMode();
             return;
         }
 
         ResetToolMode();
         _currentMode = ToolMode.ReviewWaiting;
-
+        _proactiveSourceEvent = wasGlowing ? "article_reflect" : "";
         btnGlobalReview.GetComponent<Image>().color = _colorYellow;
         btnGlobalReview.GetComponentInChildren<TMP_Text>().text = "请输入侧重点...";
 
@@ -555,27 +665,31 @@ public class CopilotActionController : MonoBehaviour
 
     private void OnGlobalDraftClicked()
     {
-        // 消除发光状态 (如果正在发光)
+        bool wasGlowing = false;
+
         if (_currentlyGlowingBtn == btnGlobalDraft)
         {
-            var glow = _currentlyGlowingBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StopGlow();
-            _currentlyGlowingBtn = null;
+            StopGlowEffect();
+            wasGlowing = true;
+
+            if (InterventionTracker.Instance != null)
+                InterventionTracker.Instance.OnButtonClicked("article_coldstart");
         }
 
-        // 【ML 闭环】：二次点击取消黄色状态，意味着 "-1.0 强拒绝"
-        if (_currentMode == ToolMode.DraftWaiting)
+        if (_currentMode == ToolMode.DraftWaiting) // 注意：如果你的枚举是 GlobalDraftWaiting，请自行替换
         {
-            if (InterventionTracker.Instance != null)
-                InterventionTracker.Instance.OnInterventionRejected("article_coldstart");
-
+            if (!string.IsNullOrEmpty(_proactiveSourceEvent) && InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionRejected(_proactiveSourceEvent);
+                Debug.Log($"<color=orange>[ML]</color> 用户在考虑后放弃了 {_proactiveSourceEvent}，记录显性拒绝 (-1.0)");
+            }
             ResetToolMode();
             return;
         }
 
         ResetToolMode();
-        _currentMode = ToolMode.DraftWaiting;
-
+        _currentMode = ToolMode.DraftWaiting; // 注意：同上
+        _proactiveSourceEvent = wasGlowing ? "article_coldstart" : "";
         btnGlobalDraft.GetComponent<Image>().color = _colorYellow;
         btnGlobalDraft.GetComponentInChildren<TMP_Text>().text = "请补充起草要求...";
 
@@ -591,31 +705,31 @@ public class CopilotActionController : MonoBehaviour
         if (NodeCardManager.Instance == null) return "";
         var rootNodes = NodeCardManager.Instance.GetAllNodes().Where(n => n.parentNode == null).ToList();
         rootNodes.Sort((a, b) => b.transform.position.y.CompareTo(a.transform.position.y));
+
         System.Text.StringBuilder sb = new System.Text.StringBuilder();
 
-        bool filterBySelection = NodeCardManager.Instance.HasSelection();
-        var selectedNodes = NodeCardManager.Instance.GetSelectedNodes();
-
+        // 【核心修复】：彻底删除 filterBySelection 和 selectedNodes 的获取逻辑，强制获取全图
         foreach (var root in rootNodes)
-            AppendNodeDFS(root, sb, 0, selectedNodes, filterBySelection);
+            AppendNodeDFS(root, sb, 0);
 
         return sb.ToString().Trim();
     }
 
-    private void AppendNodeDFS(BaseNodeController node, System.Text.StringBuilder sb, int depth, List<BaseNodeController> selectedNodes, bool filterBySelection)
+    // 【核心修复】：移除 selectedNodes 和 filterBySelection 参数，实现无差别遍历
+    private void AppendNodeDFS(BaseNodeController node, System.Text.StringBuilder sb, int depth)
     {
         if (node == null || !node.gameObject.activeSelf) return;
-        if (!filterBySelection || selectedNodes.Contains(node))
-        {
-            string indent = new string(' ', depth * 4);
-            if (!string.IsNullOrWhiteSpace(node.Data.Title)) sb.AppendLine($"{indent}# {node.Data.Title}");
-            if (!string.IsNullOrWhiteSpace(node.Data.Content)) sb.AppendLine($"{indent}{node.Data.Content.Replace("\n", "\n" + indent)}");
-            sb.AppendLine();
-        }
+
+        // 只要节点存在，就提取它的标题和内容，无视选中状态
+        string indent = new string(' ', depth * 4);
+        if (!string.IsNullOrWhiteSpace(node.Data.Title)) sb.AppendLine($"{indent}# {node.Data.Title}");
+        if (!string.IsNullOrWhiteSpace(node.Data.Content)) sb.AppendLine($"{indent}{node.Data.Content.Replace("\n", "\n" + indent)}");
+        sb.AppendLine();
+
         if (node.childNodes != null && node.childNodes.Count > 0)
         {
             foreach (var child in node.childNodes.OrderByDescending(c => c.transform.position.y))
-                AppendNodeDFS(child, sb, depth + 1, selectedNodes, filterBySelection);
+                AppendNodeDFS(child, sb, depth + 1);
         }
     }
 
@@ -677,63 +791,122 @@ public class CopilotActionController : MonoBehaviour
     }
 
     // ==========================================
-    // 供主动介入系统 (AUBIM) 调用的智能引导接口
+    // UI 按钮专属闪烁控制 (完全听从大脑指令，并突破渲染锁)
     // ==========================================
-    public void TriggerProactiveGlow()
+    private Coroutine _glowCoroutine;
+    public bool IsAnyButtonGlowing => _currentlyGlowingBtn != null;
+
+    // 【核心修复 1】：接收大脑传来的 mlKey (aiSuggestionType)
+    public void TriggerProactiveGlow(string aiSuggestionType = "")
     {
         if (!_isModalOpen || ArticleGenerator.Instance == null) return;
 
-        GameObject targetBtn = null;
-        var input = ArticleGenerator.Instance.mainBodyInput;
-        bool isFocused = input != null && input.isFocused;
+        Debug.Log($"<color=cyan>[Copilot 智能引导]</color> 侦测到停滞，尝试点亮推荐：{aiSuggestionType}");
 
-        if (_hasText && _wordCount >= 500 && !isFocused) targetBtn = btnGlobalReview;
-        else if (_hasSelection) targetBtn = btnLocalRefine;
-        else if (!_hasText) targetBtn = btnGlobalDraft;
-        else if (_isCaretInMiddle) targetBtn = btnContextTransition;
-        else targetBtn = btnContextExpand;
+        GameObject targetBtn = btnGlobalDraft; // 默认保底给全文起草
 
-        if (targetBtn != null && targetBtn.activeSelf)
+        // 【核心修复 2】：绝对服从大脑的预测结果进行精准映射！
+        if (!string.IsNullOrEmpty(aiSuggestionType))
         {
-            // 假设您的发光脚本有 StartGlow 方法
-            var glow = targetBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StartGlow(); // 如果您旧脚本叫 StartBreathing，请自行修改
-
-            _currentlyGlowingBtn = targetBtn;
-
-            // 【ML 闭环】：提前向 Tracker 注册这是一个主动推荐行为
-            if (InterventionTracker.Instance != null)
-            {
-                InterventionTracker.Instance.SetLastPredictedRecordKey(GetMLKeyForBtn(targetBtn));
-            }
-
-            Debug.Log($"<color=cyan>[Copilot 智能引导]</color> 侦测到停滞，无感推荐：{targetBtn.name}");
+            string lower = aiSuggestionType.ToLower();
+            if (lower.Contains("refine")) targetBtn = btnLocalRefine;
+            else if (lower.Contains("expand")) targetBtn = btnContextExpand;
+            else if (lower.Contains("stitch") || lower.Contains("transition")) targetBtn = btnContextTransition;
+            else if (lower.Contains("reflect") || lower.Contains("review")) targetBtn = btnGlobalReview;
+            else if (lower.Contains("coldstart") || lower.Contains("draft")) targetBtn = btnGlobalDraft;
         }
+
+        // 如果被选中的按钮当前处于隐藏状态，则放弃闪烁
+        if (targetBtn == null || !targetBtn.activeInHierarchy)
+        {
+            Debug.LogWarning($"<color=orange>[Copilot]</color> 目标按钮不可见，取消本次推荐闪烁。");
+            if (InterventionTracker.Instance != null) InterventionTracker.Instance.AbortLocalBreathing();
+            return;
+        }
+
+        // 停止可能存在的上一个闪烁
+        StopGlowEffect();
+
+        _currentlyGlowingBtn = targetBtn;
+
+        // 【核心修复 3】：不再使用 AINodeGlowEffect，而是开启专属的强力 UI 呼吸协程
+        _glowCoroutine = StartCoroutine(ButtonBreathRoutine(targetBtn));
     }
 
-    // 【ML 闭环】：处理 "-0.2 忽略"
-    public void HandleUserTyping()
+    public void StopGlowEffect()
     {
         if (_currentlyGlowingBtn != null)
         {
-            var glow = _currentlyGlowingBtn.GetComponent<AINodeGlowEffect>();
-            if (glow != null) glow.StopGlow(); // 关掉发光（或您对应的停止方法）
-
-            if (InterventionTracker.Instance != null)
+            Image img = _currentlyGlowingBtn.GetComponent<Image>();
+            if (img != null)
             {
-                InterventionTracker.Instance.OnInterventionIgnored(GetMLKeyForBtn(_currentlyGlowingBtn));
+                img.color = _btnOriginalColor; // 恢复按钮本色
+                // 【突破渲染锁】：强制清空 CanvasRenderer 的颜色覆写！
+                img.CrossFadeColor(Color.white, 0f, true, true);
             }
             _currentlyGlowingBtn = null;
         }
+        if (_glowCoroutine != null)
+        {
+            StopCoroutine(_glowCoroutine);
+            _glowCoroutine = null;
+        }
     }
 
-    private string GetMLKeyForBtn(GameObject btn)
+    private IEnumerator ButtonBreathRoutine(GameObject btnObj)
     {
-        if (btn == btnGlobalDraft) return "article_coldstart";
-        if (btn == btnLocalRefine) return "article_refine";
-        if (btn == btnContextExpand) return "article_expand";
-        if (btn == btnContextTransition) return "article_stitch";
-        if (btn == btnGlobalReview) return "article_reflect";
-        return "unknown";
+        Image img = btnObj.GetComponent<Image>();
+        if (img == null) yield break;
+
+        Color baseColor = _btnOriginalColor;
+        Color glowColor = new Color(1f, 0.8f, 0.2f, 1f); // 耀眼金
+
+        float timer = 0f;
+        float elapsed = 0f;
+
+        // 持续闪烁 15 秒存活期
+        while (elapsed < 15f && _currentlyGlowingBtn == btnObj)
+        {
+            timer += Time.deltaTime * 3f;
+            elapsed += Time.deltaTime;
+            float lerp = (Mathf.Sin(timer) + 1f) / 2f;
+
+            img.color = Color.Lerp(baseColor, glowColor, lerp);
+
+            // 【突破渲染锁】：确保每一帧的颜色变化都能冲破 Unity Button 的死锁并被渲染出来
+            img.CrossFadeColor(Color.white, 0f, true, true);
+
+            yield return null;
+        }
+
+        // 如果 15 秒走完，且用户没有点击它
+        if (_currentlyGlowingBtn == btnObj)
+        {
+            StopGlowEffect();
+            Debug.Log("<color=yellow>[Copilot]</color> 按钮闪烁 15 秒超时，用户未理睬，自动熄灭。");
+
+            // 通知 ML Tracker 被搁置无视 (-0.2分)
+            if (InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.OnInterventionIgnored();
+            }
+        }
+    }
+
+    public void HandleUserTyping()
+    {
+        if (IsAnyButtonGlowing)
+        {
+            Debug.Log("<color=yellow>[Copilot]</color> 侦测到用户主动输入，打断 AI 闪烁推荐。");
+
+            // 熄灭 UI 颜色
+            StopGlowEffect();
+
+            // 通知大脑
+            if (InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.AbortLocalBreathing();
+            }
+        }
     }
 }

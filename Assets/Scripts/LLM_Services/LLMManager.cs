@@ -159,25 +159,25 @@ public class LLMManager : MonoBehaviour
     }
 
     // 专职生产逼问的后台流水线
-    private void GenerateSocraticQuestionsInBackground(string userPrompt, string aiAnswer)
+    // 【修改 1】：改为 public，以便 AIChatManager 调用
+    public void GenerateSocraticQuestionsInBackground(string userPrompt, string aiAnswer)
     {
-        // 截取前面一部分回答即可，防止 Token 超出
         string truncatedAnswer = aiAnswer.Length > 1000 ? aiAnswer.Substring(0, 1000) + "..." : aiAnswer;
 
+        // 去掉了容易让大模型格式错乱的 ===QUESTIONS=== 限制
         string taskPrompt = $@"你是一个极其犀利的思维引导师。
 【用户提问】：{userPrompt}
 【系统初步解答】：{truncatedAnswer}
 
-请根据上述对话，生成 3 个极其尖锐、反直觉或带有极端约束条件的“苏格拉底式发散提问”，用于激发用户的横向思维。
+请生成 3 个极其尖锐、反直觉或带有极端约束条件的“苏格拉底式发散提问”，用于激发用户的横向思维。
 【绝对铁律】：
 1. 只能且必须输出这 3 个问题，绝不要输出任何其他寒暄废话。
-2. 必须且只能用 ===QUESTIONS=== 作为开头。
-3. 每个问题严格按照“短标题|完整长句”的格式输出（注意中间的竖线|）。
+2. 每个问题严格按照“4字短标题|完整长句”的格式输出（注意中间的竖线|）。
 
-===QUESTIONS===
-0预算挑战？|如果你的社团没有任何初始预算，你会用什么极端的方法开展第一次招新？
-致命错误？|请列举出三个最容易导致你这个社团在两个月内解散的致命错误？
-跨界思考？|如果用经营独立乐队的思维来重新审视人员管理，会有什么灵感？";
+【正确格式示例】（请严格模仿以下格式）：
+0预算挑战|如果你的社团没有任何初始预算，你会用什么极端的方法开展第一次招新？
+致命错误|请列举出三个最容易导致你这个社团在两个月内解散的致命错误？
+跨界思考|如果用经营独立乐队的思维来重新审视人员管理，会有什么灵感？";
 
         // 调用后台纯净通道
         TaskChat(taskPrompt, (response, success) =>
@@ -185,51 +185,46 @@ public class LLMManager : MonoBehaviour
             if (success)
             {
                 List<ChatSuggestionManager.SuggestionData> parsedSuggestions = new List<ChatSuggestionManager.SuggestionData>();
-                string rawResponse = response;
 
-                // 暴力探测标记符
-                int markerIdx = rawResponse.IndexOf("===QUESTIONS===");
-                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("=== QUESTIONS ===");
-                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("===QUESTIONS");
-                if (markerIdx == -1) markerIdx = rawResponse.IndexOf("QUESTIONS===");
+                // 【修改 2】：暴力按行解析，无视大模型的各种前缀和 Markdown
+                string[] qLines = response.Split(new char[] { '\n', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
 
-                if (markerIdx != -1)
+                foreach (string line in qLines)
                 {
-                    int nextLineIdx = rawResponse.IndexOf('\n', markerIdx);
-                    if (nextLineIdx != -1 && nextLineIdx < rawResponse.Length)
+                    string cleanLine = line.Trim().Replace("*", "").Replace("-", "").Replace("#", "");
+                    if (string.IsNullOrWhiteSpace(cleanLine) || cleanLine.Contains("QUESTION") || cleanLine.Contains("===") || cleanLine.Contains("```"))
+                        continue;
+
+                    // 剔除前缀如 "1. "
+                    if (cleanLine.Length > 2 && char.IsDigit(cleanLine[0]) && (cleanLine[1] == '.' || cleanLine[1] == '、'))
+                        cleanLine = cleanLine.Substring(2).Trim();
+
+                    int splitPos = cleanLine.IndexOf('|');
+                    if (splitPos == -1) splitPos = cleanLine.IndexOf('：');
+                    if (splitPos == -1) splitPos = cleanLine.IndexOf(':');
+
+                    if (splitPos != -1 && splitPos > 0 && splitPos < cleanLine.Length - 1)
                     {
-                        string questionsPart = rawResponse.Substring(nextLineIdx).Trim();
-                        string[] qLines = questionsPart.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-
-                        foreach (string line in qLines)
+                        parsedSuggestions.Add(new ChatSuggestionManager.SuggestionData
                         {
-                            string cleanLine = line.Trim().Replace("*", "").Replace("-", "").Trim();
-                            if (cleanLine.Length > 2 && char.IsDigit(cleanLine[0]) && cleanLine[1] == '.')
-                                cleanLine = cleanLine.Substring(2).Trim();
-
-                            int splitPos = cleanLine.IndexOf('|');
-                            if (splitPos == -1) splitPos = cleanLine.IndexOf('：');
-                            if (splitPos == -1) splitPos = cleanLine.IndexOf(':');
-
-                            if (splitPos != -1)
-                            {
-                                parsedSuggestions.Add(new ChatSuggestionManager.SuggestionData
-                                {
-                                    ShortTitle = cleanLine.Substring(0, splitPos).Trim(),
-                                    FullContent = cleanLine.Substring(splitPos + 1).Trim()
-                                });
-                            }
-                        }
+                            ShortTitle = cleanLine.Substring(0, splitPos).Trim(),
+                            FullContent = cleanLine.Substring(splitPos + 1).Trim()
+                        });
                     }
                 }
 
-                // 后台处理完毕，丢给管理器进入倒计时生命周期！
-                if (ChatSuggestionManager.Instance != null && parsedSuggestions.Count > 0)
+                // 【修改 3】：增加解析失败的防静默死亡日志
+                if (parsedSuggestions.Count > 0 && ChatSuggestionManager.Instance != null)
                 {
+                    Debug.Log($"<color=green>[LLM 逼问生成成功]</color> 解析到 {parsedSuggestions.Count} 条数据，交付给 Manager！");
                     ChatSuggestionManager.Instance.StartSuggestionLifecycle(aiAnswer.Length, parsedSuggestions);
                 }
+                else
+                {
+                    Debug.LogWarning($"<color=red>[LLM 逼问解析失败]</color> 未能解析出正确格式，原始返回：\n{response}");
+                }
             }
-        }, false, false); // 不注入画布结构，纯后台任务
+        }, false, false);
     }
 
     /// <summary>

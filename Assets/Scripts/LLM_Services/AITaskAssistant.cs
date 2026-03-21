@@ -192,4 +192,47 @@ public class AITaskAssistant : MonoBehaviour
             }, false); // 纯文本解析，不需要注入画布大纲
         }
     }
+
+    /// <summary>
+    /// 【新增】将整篇文章逆向解构为思维导图结构
+    /// </summary>
+    public void ExtractArticleToTreeData(string articleText, System.Action<AITreeRootData> onComplete)
+    {
+        if (string.IsNullOrWhiteSpace(articleText))
+        {
+            onComplete?.Invoke(null);
+            return;
+        }
+
+        // 调用刚才在 AIPromptLibrary 中写好的专属逆向提纲 Prompt
+        string prompt = AIPromptLibrary.GetReverseOutlinePrompt(articleText);
+
+        if (LLMManager.Instance != null)
+        {
+            LLMManager.Instance.TaskChat(prompt, (response, success) =>
+            {
+                if (success && !string.IsNullOrWhiteSpace(response))
+                {
+                    try
+                    {
+                        // 清洗大模型可能带有的 Markdown 代码块标记
+                        string cleanJson = response.Replace("```json", "").Replace("```", "").Trim();
+
+                        // 复用原有的 AITreeRootData 结构进行反序列化
+                        AITreeRootData treeData = Newtonsoft.Json.JsonConvert.DeserializeObject<AITreeRootData>(cleanJson);
+                        onComplete?.Invoke(treeData);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogError($"[AI 文章解构失败]: {e.Message}\nRaw Response: {response}");
+                        onComplete?.Invoke(null);
+                    }
+                }
+                else
+                {
+                    onComplete?.Invoke(null);
+                }
+            }, false); // 纯文本解析，不需要注入画布大纲
+        }
+    }
 }

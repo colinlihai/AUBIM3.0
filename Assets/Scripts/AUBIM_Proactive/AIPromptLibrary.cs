@@ -1,8 +1,8 @@
 using UnityEngine;
 
 /// <summary>
-/// AUBIM 3.0 统一提示词文库 (Prompt Library)
-/// 实验过程中所有 AI 的角色设定、回复长度、规则要求都在此修改，无需触碰核心业务逻辑代码。
+/// AUBIM 4.0 统一提示词文库 (Prompt Library)
+/// 严格映射当前的 9 大干预动作。实验过程中所有 AI 的角色设定、回复长度、规则要求都在此修改。
 /// </summary>
 public static class AIPromptLibrary
 {
@@ -15,24 +15,27 @@ public static class AIPromptLibrary
         "注意：层级越深（#越多）代表该节点是上级节点的子论点。";
 
     // ==========================================
-    // 2. 导图区：局部与全局节点生成 Prompt
+    // 2. 导图区：节点生成基础配置 (Title 与 Role)
     // ==========================================
-    public static (string Title, string RolePrompt) GetNodeInterventionPrompt(InterventionType type, bool isGlobal)
+    public static (string Title, string RolePrompt) GetNodeInterventionPrompt(InterventionType type, bool isGlobal = false)
     {
-        // 【核心修改】：使用枚举进行 switch 路由
+        // 针对画布区的 1 个全局按钮：全局思考 (Global Insight)
+        if (type == InterventionType.GlobalInsight || isGlobal)
+        {
+            return ("全局洞察", "你是一个全局战略架构师。通读用户提供的树状大纲后，提供一个能将这些散落的节点串联起来的宏观视角，或者指出宏观架构中缺乏深度的核心盲区。直接输出 60-80 字。");
+        }
+
+        // 针对画布区的 3 个局部按钮：反问、解释、追问
         switch (type)
         {
             case InterventionType.Socratic:
-                if (isGlobal) return ("全局追问", "你是一个全局战略导师。请通读用户提供的树状大纲（# 代表层级），指出其宏观架构中缺乏深度或最值得深挖的一个核心盲区。请提供 30-50 字的具体追问。");
-                else return ("深度追问", "你是一个苏格拉底式的导师。请提供 30-50 字的具体追问。不要只问'为什么'，要指出该观点可能忽视的一个具体现实因素，引导用户深入。");
+                return ("深度追问", "你是一个苏格拉底式的导师。请提供 30-50 字的具体追问。不要只问'为什么'，要指出该观点可能忽视的一个具体现实因素，引导用户深入。");
 
             case InterventionType.Counter:
-                if (isGlobal) return ("全局反向", "你是一个批判性思维导师。请通读用户提供的树状大纲，寻找其整体逻辑链条上的一个致命漏洞或被忽视的极端情况。请提供 40-60 字的详细反驳。");
-                else return ("反向思考", "你是一个批判性思维导师。请提供 40-60 字的详细反驳。必须包含一个具体的反例或数据维度来挑战用户的观点，切忌假大空。");
+                return ("反向思考", "你是一个批判性思维导师。请提供 40-60 字的详细反驳。必须包含一个具体的反例或数据维度来挑战用户的观点，切忌假大空。");
 
             case InterventionType.Elaborate:
-                if (isGlobal) return ("全局升华", "你是一个架构师。通读用户提供的树状大纲后，提供一个能将这些散落的节点串联起来的宏观视角，或者一个高级的总结性概念。60-80 字，直接输出。");
-                else return ("知识解答", "你是一个知识渊博的专家。请提供 60-80 字的专业解答或知识延展。要有具体的机制解释或例子支撑，让用户看完能直接作为素材使用。直接输出答案，不要任何废话。");
+                return ("知识延展", "你是一个知识渊博的专家。请提供 60-80 字的专业解答或知识延展。要有具体的机制解释或例子支撑，让用户看完能直接作为素材使用。直接输出答案，不要任何废话。");
 
             default:
                 return ("未定义", "你是一个助手，请简短回复。");
@@ -40,52 +43,7 @@ public static class AIPromptLibrary
     }
 
     // ==========================================
-    // 3. 成文区Prompt
-    // ==========================================
-    public static string GetArticleInterventionPrompt(InterventionType type, int stage, bool hasNodes)
-    {
-        if (stage == 0) // 冷启动破冰
-        {
-            if (hasNodes)
-            {
-                if (type == InterventionType.ArticleGap) return "你是一个写作破冰导师。用户画了导图，但面对空白正文区无从下笔。请以“起笔建议：”开头，用 30-40 字建议他先挑导图里最熟悉的一个概念，用大白话解释出来作为开头。";
-                else return "你是一个启发式导师。面对用户的空白文档，请以“反向起手：”开头，用 30-40 字提问：‘如果这篇文章最后要推翻一个常识，那个常识是什么？不如直接把它写在第一段。’";
-            }
-            else
-            {
-                return "你是一个写作陪伴者。用户面对完全空白的页面发呆。请以“破冰起步：”开头，用 30-40 字鼓励他：万事开头难，不如先敲下你现在脑海中闪过的第一个词或第一句话？";
-            }
-        }
-        else if (stage == 1) // 宏观失焦
-        {
-            if (type == InterventionType.ArticleGap) return "你是一个全局内容主编。通读整篇文章后，指出文章在【宏观结构】或【整体论证】上最缺乏的一个核心板块。请以“全局查缺：”开头，用 30-40 字给出高维度的补充建议。";
-            else return "你是一个全局战略导师。通读全文，寻找整篇文章【核心主旨】中的一个潜在漏洞或可以升华的反思点。请以“全局反思：”开头，用 30-40 字提出一个尖锐的宏观反问。";
-        }
-        else if (stage == 2) // 微观聚焦 - 在末尾线性推进
-        {
-            if (type == InterventionType.ArticleGap) return "你是一个结构化写作向导。寻找这段局部【上文】尚未展开的细节盲区。请以“顺延思路：”开头，用 30-40 字建议用户接下来该写什么。";
-            else return "你是一个批判性认知导师。对这段【上文】的逻辑前提发起挑战。请以“反向思考：”开头，用 30-40 字提出一个尖锐的反问，引导下一段的反转。";
-        }
-        else if (stage == 3) // 【新增】：微观聚焦 - 在中间插入与缝合
-        {
-            if (type == InterventionType.ArticleGap) return "你是一个逻辑缝合导师。用户卡在了【上文】和【下文】之间。请指出这两者之间缺失的过渡逻辑或上下文桥梁。请以“承上启下：”开头，用 30-40 字建议用户在这里插入什么内容。";
-            else return "你是一个批判性认知导师。对比用户的【上文】和【下文】，寻找它们之间可能存在的逻辑矛盾或跳跃。请以“逻辑质疑：”开头，用 30-40 字提出一个尖锐的问题。";
-        }
-
-        return "请简短回复。";
-    }
-
-    // ==========================================
-    // 4. 成文区统一输出规则
-    // ==========================================
-    public const string Article_Output_Rules =
-        "【规则】：\n" +
-        "1. 必须严格遵守开头的前缀要求。\n" +
-        "2. 绝对不要带引号，不要有任何寒暄或废话，只输出一行短句。\n" +
-        "3. 你的建议必须简短（30-50字以内）。";
-
-    // ==========================================
-    // 导图区：局部聚焦 + 全局背景 的高级 Prompt
+    // 3. 导图区：局部节点的精准提示词拼接 (带全局上下文)
     // ==========================================
     public static string GetCanvasLocalContextualPrompt(InterventionType type, string targetTitle, string targetContent, string globalContext)
     {
@@ -108,5 +66,51 @@ public static class AIPromptLibrary
 【你的任务】：
 请结合全局背景，严格执行以下指令：{instruction}
 【规则】：只输出你的建议、补充或反问，字数控制在40字以内，语气要具有启发性，绝不要带任何前缀标签（如“建议：”或“反问：”）。";
+    }
+
+    // ==========================================
+    // 4. 成文区：5 大核心工具的默认 Prompt 集中管理
+    // ==========================================
+    /// <summary>
+    /// 当用户点击了闪烁的按钮，且【没有打任何字直接回车】时，
+    /// 系统会自动调用这里的默认高质量提示词去执行动作。
+    /// </summary>
+    public static string GetArticleToolDefaultRequirement(InterventionType type)
+    {
+        switch (type)
+        {
+            case InterventionType.ArticleDraft:
+                return "请根据全局导图的逻辑结构，从零开始写一篇结构严谨、过渡自然的初稿文章。";
+
+            case InterventionType.ArticleRefine:
+                return "请帮我润色这段文字，使其表达更加专业、流畅，并纠正潜在的语病。";
+
+            case InterventionType.ArticleExpand:
+                return "请根据前文的逻辑和语境，自然地顺势续写接下来的内容。";
+
+            case InterventionType.ArticleStitch:
+                return "请仔细阅读上文和下文，为它们撰写一段完美的过渡衔接，填补逻辑跳跃。";
+
+            case InterventionType.ArticleReview:
+                return "请作为一名苛刻的审稿人，全面审查这篇文章，指出逻辑漏洞、结构缺陷，并给出具体的修改建议。";
+
+            default:
+                return "请按照最佳实践进行处理。";
+        }
+    }
+
+    // ==========================================
+    // 5. 逆向大纲提取 Prompt (文章 -> 导图)
+    // ==========================================
+    public static string GetReverseOutlinePrompt(string articleText)
+    {
+        return "你是一个顶级的“结构分析大师”和“逆向提纲提取师”。请阅读用户提供的长篇文章，提取其核心骨架，并转化为结构极其严谨的思维导图JSON。\n" +
+               "【核心重构规则】：\n" +
+               "1. **核心主旨为根**：`rootTitle` 提炼文章的核心标题（不超过10字），`rootContent` 提炼全文的中心思想或结论（20-40字）。\n" +
+               "2. **段落论点为干（一级子节点）**：严格按照文章的行文脉络（起承转合），提取每个段落或逻辑区块的【核心分论点/小标题】作为第一级 `children`。\n" +
+               "3. **论据细节为叶（二级子节点）**：将支撑该分论点的关键论据、数据、案例或细节，作为第二级 `children`。\n" +
+               "4. **信息极度脱水**：绝对不要照抄原句！必须将长句浓缩为精炼的客观概念陈述。\n" +
+               "5. **JSON 结构约束**：只输出纯 JSON 字符串，绝不要包含 ```json 标记，不要任何解释。必须包含 rootTitle, rootContent 以及 children 数组（每个子节点包含 title, content, children）。\n\n" +
+               "【需要进行逆向提纲抽离的文章全文】：\n" + articleText;
     }
 }

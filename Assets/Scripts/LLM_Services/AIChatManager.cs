@@ -41,7 +41,7 @@ public class AIChatManager : MonoBehaviour
 
             chatInput.onSubmit.AddListener((val) => {
                 if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return;
-                if (!string.IsNullOrWhiteSpace(val)) OnSendClicked();
+                OnSendClicked();
             });
         }
     }
@@ -49,41 +49,50 @@ public class AIChatManager : MonoBehaviour
     public void OnSendClicked()
     {
         string text = chatInput.text.TrimEnd('\r', '\n', ' ');
-        if (string.IsNullOrWhiteSpace(text)) return;
 
-        // 【锁定动作 B】发送消息并等待回复时，继续保持锁定状态
-        if (InterventionTracker.Instance != null) InterventionTracker.Instance.SuspendByChat();
-
-        // 1. 组装数据并记录到本地 UI 数据列表 (用于存盘)
-        var userMsg = new ChatMessageData { role = "user", content = text, timestamp = System.DateTime.Now.ToString() };
-        _allMessages.Add(userMsg);
-
-        // 2. UI 立刻显示用户的问题 (传入数据对象绑定)
-        AddBubbleUI(userMsg, true);
-
-        // 3. 防空行清空
-        StartCoroutine(ResetInputNextFrame());
-
-        // [埋点]
-        if (UserBehaviorSystem.Instance != null)
-        {
-            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Query, "User", "Chat", text.Length);
-        }
-
+        // 【修复 2】：先让 Copilot 中枢看一眼！如果它正在待命，空文本也会被它截获去执行默认 Prompt！
         bool intercepted = false;
         if (CopilotActionController.Instance != null)
         {
             intercepted = CopilotActionController.Instance.TryInterceptChatSubmit(text);
         }
 
-        // 如果 Copilot 没有拦截 (说明不是在续写/衔接模式)，就走普通的 AI 闲聊
-        if (!intercepted)
+        // 如果 Copilot 拦截了（吃掉了这次回车），直接清空输入框并结束，不要走下面普通的闲聊逻辑
+        if (intercepted)
         {
-            StartCoroutine(RequestAI(text));
+            StartCoroutine(ResetInputNextFrame());
+            return;
         }
+
+        // ==========================================
+        // 下面是普通的 AI 闲聊逻辑 (用户正常问问题)
+        // ==========================================
+
+        // 【修复 3】：如果不是 Copilot 工具模式，普通聊天依旧拦截纯空格和空行
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        // 保持锁定
+        if (InterventionTracker.Instance != null) InterventionTracker.Instance.SuspendByChat();
+
+        // 1. 组装数据并显示气泡
+        var userMsg = new ChatMessageData { role = "user", content = text, timestamp = System.DateTime.Now.ToString() };
+        _allMessages.Add(userMsg);
+        AddBubbleUI(userMsg, true);
+
+        // 2. 清空输入框
+        StartCoroutine(ResetInputNextFrame());
+
+        // 3. 埋点
+        if (UserBehaviorSystem.Instance != null)
+        {
+            UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Query, "User", "Chat", text.Length);
+        }
+
+        // 4. 发起请求
+        StartCoroutine(RequestAI(text));
     }
 
-    private System.Collections.IEnumerator ResetInputNextFrame()
+    private IEnumerator ResetInputNextFrame()
     {
         // 关键：等待这一帧结束，让 TMP 把底层的物理回车事件彻底消耗掉
         yield return null;
@@ -128,21 +137,55 @@ public class AIChatManager : MonoBehaviour
             {
                 if (success && !string.IsNullOrWhiteSpace(response))
                 {
+                    response = FormatAIResponse(response);
+
                     var aiMsg = new ChatMessageData { role = "assistant", content = response, timestamp = System.DateTime.Now.ToString() };
                     _allMessages.Add(aiMsg);
                     AddBubbleUI(aiMsg, false);
                     // [埋点]
                     if (UserBehaviorSystem.Instance != null)
                         UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.AI_Chat_Response, "AI", "Reply", response.Length);
+
+                    if (InterventionTracker.Instance != null)
+                    {
+                        InterventionTracker.Instance.ResumeFromChat();
+                        InterventionTracker.Instance.GrantReadingBuffer(response.Length);
+                    }
+                    if (LLMManager.Instance != null)
+                    {
+                        LLMManager.Instance.GenerateSocraticQuestionsInBackground(userPrompt, response);
+                    }
                 }
                 else if (!success)
                 {
                     var errMsg = new ChatMessageData { role = "assistant", content = $"[错误] {response}", timestamp = System.DateTime.Now.ToString() };
                     AddBubbleUI(errMsg, false);
+
+                    if (InterventionTracker.Instance != null) InterventionTracker.Instance.ResumeFromChat();
                 }
             });
             yield return null;
         }
+    }
+
+    // ==========================================
+    // 文本格式化与清洗过滤器
+    // ==========================================
+    private string FormatAIResponse(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText)) return "";
+
+        string cleaned = rawText;
+        cleaned = cleaned.Replace("\u200B", "").Replace("\uFEFF", "").Replace("\u200C", "").Replace("\u200D", "");
+        // 1. 去除无意义的 Markdown 标题符号 (例如 "### 标题" 变成单纯的 "标题")
+        // (?m) 代表多行匹配模式，^ 代表行首，#+ 代表多个#号，\s* 代表后面的空格
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"(?m)^#+\s*", "");
+        cleaned = cleaned.Replace("**", "");
+        // 2. 去除灾难级的空行：将 3 个或以上连续的换行符（包含夹杂的空格），强行压缩为 2 个换行符 (保留正常的段落间距)
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"(\r?\n\s*){2,}", "\n\n");
+
+        // 3. 剔除首尾多余的留白
+        return cleaned.Trim();
     }
 
     // ==========================================
@@ -152,6 +195,8 @@ public class AIChatManager : MonoBehaviour
     /// <summary> 生成工具结果的 AI 气泡，并可选择是否写入大模型记忆 </summary>
     public void AddSystemAIBubble(string text, bool remember = false)
     {
+        text = FormatAIResponse(text);
+
         var aiMsg = new ChatMessageData { role = "assistant", content = text, timestamp = System.DateTime.Now.ToString() };
         _allMessages.Add(aiMsg);
         AddBubbleUI(aiMsg, false);
@@ -163,28 +208,38 @@ public class AIChatManager : MonoBehaviour
         }
     }
 
+    public class ChatBubbleTracker
+    {
+        public GameObject BubbleObject;
+        public ChatMessageData MessageData;
+    }
+
     /// <summary> 生成上下文引用气泡，并可选择是否写入大模型记忆 </summary>
-    public void AddContextQuoteBubble(string quoteText, bool remember = false)
+    public ChatBubbleTracker AddContextQuoteBubble(string quoteText, bool remember = false)
     {
         string formattedQuote = $"<i><color=#555555>锚点：\n\"{quoteText}\"</color></i>";
         var quoteMsg = new ChatMessageData { role = "user", content = formattedQuote, timestamp = System.DateTime.Now.ToString() };
         _allMessages.Add(quoteMsg);
-        AddBubbleUI(quoteMsg, true);
 
-        // 告诉 AI 用户引用了这段话
+        // 【修改】：接收生成的物体对象
+        GameObject obj = AddBubbleUI(quoteMsg, true);
+
         if (remember && LLMManager.Instance != null)
         {
             LLMManager.Instance.AddToHistory("user", $"我圈定了以下文本作为参考：\n{quoteText}");
         }
+
+        // 返回追踪凭证
+        return new ChatBubbleTracker { BubbleObject = obj, MessageData = quoteMsg };
     }
 
     // ==========================================
     // 气泡生成与销毁核心逻辑
     // ==========================================
 
-    private void AddBubbleUI(ChatMessageData msgData, bool isUser)
+    private GameObject AddBubbleUI(ChatMessageData msgData, bool isUser)
     {
-        if (messagePrefab == null) return;
+        if (messagePrefab == null) return null;
 
         GameObject obj = Instantiate(messagePrefab, contentContainer);
         var ctrl = obj.GetComponent<ChatMessageController>();
@@ -193,24 +248,23 @@ public class AIChatManager : MonoBehaviour
         {
             ctrl.Setup(msgData.content, isUser);
 
-            // 接管气泡上的专属删除按钮
             if (ctrl.deleteButton != null)
             {
-                // 先清空一下，防止重复绑定
                 ctrl.deleteButton.onClick.RemoveAllListeners();
-
-                // 将删除按钮与外层的 DeleteChatBubble 逻辑绑定
                 ctrl.deleteButton.onClick.AddListener(() => {
                     DeleteChatBubble(obj, msgData);
                 });
             }
-            else
-            {
-                Debug.LogWarning("[UI] 气泡 Prefab 上的 DeleteButton 没有赋值或丢失！");
-            }
         }
 
         StartCoroutine(ScrollToBottom());
+        return obj; // 返回生成的对象
+    }
+
+    public void RemoveSpecificBubble(ChatBubbleTracker tracker)
+    {
+        if (tracker == null || tracker.BubbleObject == null) return;
+        DeleteChatBubble(tracker.BubbleObject, tracker.MessageData);
     }
 
     // 处理气泡销毁与三端数据同步
@@ -247,7 +301,7 @@ public class AIChatManager : MonoBehaviour
         StartCoroutine(RebuildChatLayoutNextFrame());
     }
 
-    private System.Collections.IEnumerator RebuildChatLayoutNextFrame()
+    private IEnumerator RebuildChatLayoutNextFrame()
     {
         yield return null;
         if (contentContainer != null)
@@ -320,8 +374,10 @@ public class AIChatManager : MonoBehaviour
         Image bg = chatInput.GetComponent<Image>();
         if (bg == null) return;
 
-        // 防止重复触发
-        if (_inputGlowCoroutine != null) StopCoroutine(_inputGlowCoroutine);
+        if (_inputGlowCoroutine != null)
+        {
+            return; // 如果已经在闪烁，直接拦截，不重置颜色也不重新启动协程
+        }
 
         _originalInputColor = bg.color;
         _inputGlowCoroutine = StartCoroutine(ChatInputGlowRoutine(bg));
@@ -353,6 +409,52 @@ public class AIChatManager : MonoBehaviour
             float t = (Mathf.Sin(Time.time * speed) + 1f) / 2f;
             bg.color = Color.Lerp(_originalInputColor, goldColor, t);
             yield return null;
+        }
+    }
+
+    // ==========================================
+    // 气泡内容追加与独立生成接口 (Copilot 专用)
+    // ==========================================
+
+    /// <summary> 给已存在的引用气泡追加用户的附加指令 </summary>
+    public void AppendTextToBubble(ChatBubbleTracker tracker, string extraText)
+    {
+        if (tracker == null || tracker.BubbleObject == null) return;
+
+        // 1. 更新数据层，用醒目的颜色把用户的附加指令拼接到下面
+        tracker.MessageData.content += $"\n\n<color=#00e5ff><b>[附加指令]：</b> {extraText}</color>";
+
+        // 2. 更新 UI 层
+        var ctrl = tracker.BubbleObject.GetComponent<ChatMessageController>();
+        if (ctrl != null)
+        {
+            // 重新调用 Setup 刷新内部的 TextMeshPro 文本
+            ctrl.Setup(tracker.MessageData.content, true);
+        }
+
+        // 3. 将追加了指令的完整内容写入大模型记忆中，确保 AI 能同时看到选区和要求
+        if (LLMManager.Instance != null)
+        {
+            LLMManager.Instance.AddToHistory("user", $"用户圈定了上述参考文本，并提出了具体要求：\n{extraText}");
+        }
+    }
+
+    /// <summary> 纯手动创建一个普通的用户发言气泡 (不带引用框) </summary>
+    public void AddStandardUserBubble(string displayText, string historyText = null, bool remember = true)
+    {
+        // 如果没有单独传历史文本，就默认用显示文本
+        if (string.IsNullOrEmpty(historyText)) historyText = displayText;
+
+        var msg = new ChatMessageData { role = "user", content = displayText, timestamp = System.DateTime.Now.ToString() };
+        _allMessages.Add(msg);
+
+        // 生成 UI
+        AddBubbleUI(msg, true);
+
+        // 存入记忆的文本是纯净的，不带富文本标签
+        if (remember && LLMManager.Instance != null)
+        {
+            LLMManager.Instance.AddToHistory("user", historyText);
         }
     }
 }
