@@ -49,10 +49,18 @@ public class InterventionTracker : MonoBehaviour
     public List<ProactiveButtonUI> proactiveButtons;
 
     [Header("观察期设置 (AUBIM 自适应双轨制)")]
-    public float baseCanvasStall = 20f;
-    public float baseArticleStall = 15f;
+    public float baseCanvasStall = 35f;
+    public float baseArticleStall = 25f;
     public float observationWindow = 45f;
     public float maxToleranceOffset = 30f;
+
+    [Header("ML 容忍度步长调节 (动态颗粒度)")]
+    public float penaltyExplicitReject = 10f; // 显性拒绝增加的容忍度 (+10s)
+    public float penaltyIgnored = 3f;         // 搁置无视增加的容忍度 (+3s)
+    public float rewardImplicit = -1.5f;      // 隐性采纳减少的容忍度 (-1.5s)
+    public float rewardExplicit = -3f;        // 显性采纳减少的容忍度 (-3s)
+    public float rewardCoCreation = -5f;      // 深度共创减少的容忍度 (-5s)
+    public float rewardPreemptive = -1f;      // 提前抢答减少的容忍度 (-1s)
 
     public string CurrentArticleAction { get; private set; } = "None";
 
@@ -429,7 +437,7 @@ public class InterventionTracker : MonoBehaviour
 
         if (string.IsNullOrEmpty(key)) return; // 拦截幽灵数据
 
-        UpdateProfileRecord(key, -1.0f, +10f); 
+        UpdateProfileRecord(key, -1.0f, penaltyExplicitReject); 
         Debug.Log($"<color=red>[ML]</color> {key} 遭显性拒绝 (-1.0分)。");
         RecordSingleMLData(key, -1.0f, "Explicit_Reject");
     }
@@ -444,7 +452,7 @@ public class InterventionTracker : MonoBehaviour
 
         if (string.IsNullOrEmpty(key)) return;
 
-        UpdateProfileRecord(key, -0.2f, +3f);
+        UpdateProfileRecord(key, -0.2f, penaltyIgnored);
         Debug.Log($"<color=yellow>[ML]</color> {key} 被搁置 (-0.2分)。");
         RecordSingleMLData(key, -0.2f, "Ignored_Timeout_Or_Overwritten");
     }
@@ -458,7 +466,7 @@ public class InterventionTracker : MonoBehaviour
 
         if (string.IsNullOrEmpty(key)) return;
 
-        UpdateProfileRecord(key, 0.5f, -1.5f);
+        UpdateProfileRecord(key, 0.5f, rewardImplicit);
         Debug.Log($"<color=magenta>[ML]</color> {key} 获隐性采纳 (+0.5分)！");
         RecordSingleMLData(key, 0.5f, "Implicit_Scaffold_Accepted");
         _lastPredictedRecordKey = "";
@@ -473,7 +481,7 @@ public class InterventionTracker : MonoBehaviour
 
         if (string.IsNullOrEmpty(key)) return;
 
-        UpdateProfileRecord(key, 1.5f, -5f);
+        UpdateProfileRecord(key, 1.5f, rewardCoCreation);
         Debug.Log($"<color=cyan>[ML]</color> {key} 达成深度共创 (+1.5分)！");
         RecordSingleMLData(key, 1.5f, "Co_Creation");
         _lastPredictedRecordKey = "";
@@ -494,7 +502,7 @@ public class InterventionTracker : MonoBehaviour
             return;
         }
 
-        UpdateProfileRecord(key, 1.0f, -3f);
+        UpdateProfileRecord(key, 1.0f, rewardExplicit);
         Debug.Log($"<color=green>[ML]</color> {key} 获显性采纳 (+1.0分)！");
         RecordSingleMLData(key, 1.0f, "Explicit_Adopt");
         _lastPredictedRecordKey = "";
@@ -512,7 +520,7 @@ public class InterventionTracker : MonoBehaviour
         if (string.IsNullOrEmpty(key)) return;
 
         // 核心：步长设定为 -1.0f。每次抢答，下一次的专属等待时间就会缩短 1 秒！
-        UpdateProfileRecord(key, 0.2f, -1.0f);
+        UpdateProfileRecord(key, 0.2f, rewardPreemptive);
 
         Debug.Log($"<color=cyan>[ML]</color> {key} 被用户提前抢答 (+0.2分)！降低容忍度使其下次更快出现 (-1.0s)。");
         RecordSingleMLData(key, 0.2f, "Preemptive_Typing");

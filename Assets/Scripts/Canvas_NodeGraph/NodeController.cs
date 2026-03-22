@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro; // 必须引用
+using TMPro;
+using System.Collections; // 必须引用
 
 public class NodeController : BaseNodeController
 {
@@ -13,7 +14,6 @@ public class NodeController : BaseNodeController
     public TMP_InputField bodyInput;  // 引用 CoreBody 里的 Input
 
     private Image _titleHitBox;
-
     private string _tempStartTitle;
 
     protected override void Awake()
@@ -35,7 +35,6 @@ public class NodeController : BaseNodeController
         if (titleInput != null)
         {
             // 获取 InputField 依赖的图形组件 (Target Graphic)
-            // 通常是一个 Image (即使是透明的)
             _titleHitBox = titleInput.GetComponent<Image>();
 
             // 如果 InputField 没有 Image，尝试找它的 TargetGraphic
@@ -50,19 +49,17 @@ public class NodeController : BaseNodeController
             // 监听变化：只要内容变了，就重新判断
             titleInput.onValueChanged.AddListener(UpdateTitleRaycast);
 
-            // [新增] 1. 获得焦点：记录旧标题 + 埋点
+            // 1. 获得焦点：记录旧标题 + 埋点
             titleInput.onSelect.AddListener((val) => {
                 _tempStartTitle = titleInput.text;
             });
-            // [新增] 2. 失去焦点：提交命令 + 埋点
-            // 注意：这里替换了原来的 onEndEdit.AddListener(OnTitleEndEdit)
+            // 2. 失去焦点：提交命令 + 埋点
             titleInput.onDeselect.AddListener((val) => {
                 string finalTitle = titleInput.text;
 
                 // 只有内容变了才提交命令
                 if (CommandManager.Instance != null && finalTitle != _tempStartTitle)
                 {
-                    // 更新数据 (先更新一次，确保 Command 记录的是正确的新值)
                     if (Data != null) Data.Title = finalTitle;
 
                     var cmd = new EditTitleCommand(this, _tempStartTitle, finalTitle);
@@ -74,6 +71,7 @@ public class NodeController : BaseNodeController
         // 1. 监听正文编辑结束：模拟 LLM 生成标题
         if (bodyInput != null)
         {
+            bodyInput.lineType = TMP_InputField.LineType.MultiLineNewline;
             bodyInput.onEndEdit.AddListener(OnContentEndEdit);
         }
 
@@ -91,6 +89,44 @@ public class NodeController : BaseNodeController
                 _hasGeneratedTitleOnce = false;
                 _lastTitleGenSourceContent = ""; // 重置为空，确保从零开始计数
             }
+        }
+    }
+
+    // ==========================================
+    // 【核心修复 2】：接管并分离 Enter 与 Shift+Enter 逻辑
+    // ==========================================
+    private void Update() // 去掉 protected override
+    {
+        // 删掉了 base.Update();
+
+        if (bodyInput != null && bodyInput.isFocused)
+        {
+            // 检测到按下了回车键 (主键盘回车 或 小键盘回车)
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            {
+                // 如果没有按住 Shift 键，说明用户想“提交并失焦”
+                if (!Input.GetKey(KeyCode.LeftShift) && !Input.GetKey(KeyCode.RightShift))
+                {
+                    StartCoroutine(HandleSubmitAndDefocus());
+                }
+                // 如果按住了 Shift，什么都不做！
+                // 因为 bodyInput 已经是 MultiLineNewline 模式，它原生会完美处理换行且绝不失焦
+            }
+        }
+    }
+
+    private IEnumerator HandleSubmitAndDefocus()
+    {
+        // 延迟到当前帧末尾，确保 TMP 已经把原生换行符敲进 text 里了
+        yield return new WaitForEndOfFrame();
+
+        if (bodyInput != null)
+        {
+            // 把刚刚因为按 Enter 产生的那一个多余的换行符切掉
+            bodyInput.text = bodyInput.text.TrimEnd('\r', '\n');
+
+            // 手动强制失焦！这会极其自然地触发上面的 onEndEdit 事件
+            bodyInput.DeactivateInputField();
         }
     }
 
@@ -114,11 +150,7 @@ public class NodeController : BaseNodeController
             _lastTitleGenSourceContent = currentContent;
             // 2. 标记已经触发过 (下次就进入 update 模式)
             _hasGeneratedTitleOnce = true;
-
-            // 3. 视觉反馈 (可选：在标题栏显示 Loading 动画或文字变色)
-            // if (titleInput != null && string.IsNullOrEmpty(titleInput.text)) titleInput.placeholder.GetComponent<TMP_Text>().text = "AI 思考中...";
-
-            // 4. 调用 AI
+            // 调用 AI
             AITaskAssistant.Instance.GenerateTitle(currentContent, (newTitle) =>
             {
                 if (this == null) return;
@@ -135,7 +167,6 @@ public class NodeController : BaseNodeController
                 }
 
                 // 回调中执行 Command 修改
-                // 注意：这里为了体验流畅，不建议弹 Toast，静默更新即可
                 var cmd = new EditTitleCommand(this, Data.Title, newTitle);
                 CommandManager.Instance.ExecuteCommand(cmd);
             });
