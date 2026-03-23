@@ -387,7 +387,8 @@ public class CopilotActionController : MonoBehaviour
     // ==========================================
     private void ExecuteExpand(string userPrompt)
     {
-        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? "请自然地续写接下来的 1-2 个段落。" : userPrompt;
+        // 【核心修复】：调用 AIPromptLibrary 获取默认提示词
+        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? AIPromptLibrary.GetArticleToolDefaultRequirement(InterventionType.ArticleExpand) : userPrompt;
         string prompt = $"请根据要求：【{requirement}】，紧接在以下文本之后续写新内容，直接输出结果：\n{_contextBefore}";
 
         btnContextExpand.GetComponent<Image>().color = _colorGreen;
@@ -403,7 +404,6 @@ public class CopilotActionController : MonoBehaviour
 
     private void ExecuteRefine(string userPrompt)
     {
-        // 防御性拦截：如果没选中文字就按了回车
         if (!_hasSelection || string.IsNullOrWhiteSpace(_selectedText))
         {
             if (AIChatManager.Instance != null) AIChatManager.Instance.AddSystemAIBubble("[执行失败: 未检测到选中的文本，请先在右侧高亮选择要润色的内容。]");
@@ -411,7 +411,8 @@ public class CopilotActionController : MonoBehaviour
             return;
         }
 
-        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? "请润色这段文字，使其更加流畅专业。" : userPrompt;
+        // 【核心修复】：调用 AIPromptLibrary 获取默认提示词
+        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? AIPromptLibrary.GetArticleToolDefaultRequirement(InterventionType.ArticleRefine) : userPrompt;
         string prompt = $"你是一个资深编辑。请根据要求：【{requirement}】，对以下文本进行润色重写，直接输出结果，不要解释：\n{_selectedText}";
 
         btnLocalRefine.GetComponent<Image>().color = _colorGreen;
@@ -427,7 +428,8 @@ public class CopilotActionController : MonoBehaviour
 
     private void ExecuteTransition(string userPrompt)
     {
-        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? "请生成一段过渡文字，使上下文逻辑连贯。" : userPrompt;
+        // 【核心修复】：调用 AIPromptLibrary 获取默认提示词
+        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? AIPromptLibrary.GetArticleToolDefaultRequirement(InterventionType.ArticleStitch) : userPrompt;
         string prompt = $"请根据要求：【{requirement}】，在以下两段文本之间生成过渡内容。直接输出这部分过渡段落。\n上文：{_contextBefore}\n下文：{_contextAfter}";
 
         btnContextTransition.GetComponent<Image>().color = _colorGreen;
@@ -443,14 +445,14 @@ public class CopilotActionController : MonoBehaviour
 
     private void ExecuteReview(string userPrompt)
     {
-        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? "请给出结构和逻辑上的修改建议。" : userPrompt;
+        // 【核心修复】：调用 AIPromptLibrary 获取默认提示词
+        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? AIPromptLibrary.GetArticleToolDefaultRequirement(InterventionType.ArticleReview) : userPrompt;
         string fullText = ArticleGenerator.Instance.mainBodyInput.text;
         string prompt = $"作为学术审稿人，请阅读以下全文。根据侧重点：【{requirement}】，给出逻辑和结构上的修改建议，切勿直接重写正文：\n{fullText}";
 
         btnGlobalReview.GetComponent<Image>().color = _colorGreen;
         btnGlobalReview.GetComponentInChildren<TMP_Text>().text = "正在审阅...";
 
-        // 注意：重量级功能，传 false 不记忆大段内容，避免 Token 爆炸
         ExecuteToolPrompt(prompt, "GlobalReview", false, "", (success, response) =>
         {
             ResetToolMode();
@@ -469,7 +471,8 @@ public class CopilotActionController : MonoBehaviour
             return;
         }
 
-        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? "请根据全局导图的逻辑结构，从零开始写一篇结构严谨的文章。" : userPrompt;
+        // 【核心修复】：调用 AIPromptLibrary 获取默认提示词
+        string requirement = string.IsNullOrWhiteSpace(userPrompt) ? AIPromptLibrary.GetArticleToolDefaultRequirement(InterventionType.ArticleDraft) : userPrompt;
         string prompt = $@"你是一个专栏作家。请根据提供的导图素材撰写内容。
 素材的标题层级反映了内容的逻辑结构。
 【用户特别指令】：{requirement}
@@ -479,7 +482,6 @@ public class CopilotActionController : MonoBehaviour
         btnGlobalDraft.GetComponent<Image>().color = _colorGreen;
         btnGlobalDraft.GetComponentInChildren<TMP_Text>().text = "正在起草...";
 
-        // 注意：全文起草是重量级操作，remember 传 false，不占用聊天记忆上下文！
         ExecuteToolPrompt(prompt, "GlobalDraft", false, userPrompt, (success, response) =>
         {
             ResetToolMode();
@@ -490,13 +492,13 @@ public class CopilotActionController : MonoBehaviour
 
     private void ExecuteToolPrompt(string finalPrompt, string eventName, bool remember, string userOriginalRequest = "", System.Action<bool, string> customCallback = null)
     {
-        // 1. 设置 AI 工作状态锁定 (保留：因为无论是手动还是被动，只要 AI 在跑，就得锁定界面防抖)
+        // 1. 设置 AI 工作状态锁定 
         if (InterventionTracker.Instance != null)
         {
             InterventionTracker.Instance.SetAIProcessing(true);
         }
 
-        // 2. 基础遥测埋点 (保留：这只是用来记录用户用了什么功能，不影响 AI 的 ML 评分)
+        // 2. 基础遥测埋点
         if (UserBehaviorSystem.Instance != null)
             UserBehaviorSystem.Instance.LogEvent(BehaviorEventType.Article_Generate_Local, "Copilot", eventName, 1);
 
@@ -510,7 +512,13 @@ public class CopilotActionController : MonoBehaviour
         LLMManager.Instance.TaskChat(finalPrompt, (response, success) =>
         {
             // 释放 AI 工作状态
-            if (InterventionTracker.Instance != null) InterventionTracker.Instance.SetAIProcessing(false);
+            if (InterventionTracker.Instance != null)
+            {
+                InterventionTracker.Instance.SetAIProcessing(false);
+                // 【核心修复 1】：根据 AI 返回的字数，自动赋予超长“阅读免打扰护盾”！
+                // 这保证了用户在阅读起草、润色结果时，无论发呆多久都不会被打扰。
+                if (success) InterventionTracker.Instance.GrantReadingBuffer(response.Length);
+            }
 
             if (customCallback != null)
             {
@@ -715,7 +723,6 @@ public class CopilotActionController : MonoBehaviour
         return sb.ToString().Trim();
     }
 
-    // 【核心修复】：移除 selectedNodes 和 filterBySelection 参数，实现无差别遍历
     private void AppendNodeDFS(BaseNodeController node, System.Text.StringBuilder sb, int depth)
     {
         if (node == null || !node.gameObject.activeSelf) return;
@@ -796,16 +803,15 @@ public class CopilotActionController : MonoBehaviour
     private Coroutine _glowCoroutine;
     public bool IsAnyButtonGlowing => _currentlyGlowingBtn != null;
 
-    // 【核心修复 1】：接收大脑传来的 mlKey (aiSuggestionType)
     public void TriggerProactiveGlow(string aiSuggestionType = "")
     {
         if (!_isModalOpen || ArticleGenerator.Instance == null) return;
 
         Debug.Log($"<color=cyan>[Copilot 智能引导]</color> 侦测到停滞，尝试点亮推荐：{aiSuggestionType}");
 
-        GameObject targetBtn = btnGlobalDraft; // 默认保底给全文起草
+        // 【核心修复 2】：移除默认保底给 btnGlobalDraft 的设定，默认设为空！
+        GameObject targetBtn = null; 
 
-        // 【核心修复 2】：绝对服从大脑的预测结果进行精准映射！
         if (!string.IsNullOrEmpty(aiSuggestionType))
         {
             string lower = aiSuggestionType.ToLower();
@@ -816,10 +822,10 @@ public class CopilotActionController : MonoBehaviour
             else if (lower.Contains("coldstart") || lower.Contains("draft")) targetBtn = btnGlobalDraft;
         }
 
-        // 如果被选中的按钮当前处于隐藏状态，则放弃闪烁
+        // 只有当明确命中，且按钮当前符合显示条件（比如全文起草要求文本必须为空）时，才允许闪烁！
         if (targetBtn == null || !targetBtn.activeInHierarchy)
         {
-            Debug.LogWarning($"<color=orange>[Copilot]</color> 目标按钮不可见，取消本次推荐闪烁。");
+            Debug.LogWarning($"<color=orange>[Copilot]</color> 目标按钮不匹配或不可见，取消本次推荐闪烁。");
             if (InterventionTracker.Instance != null) InterventionTracker.Instance.AbortLocalBreathing();
             return;
         }
@@ -828,8 +834,6 @@ public class CopilotActionController : MonoBehaviour
         StopGlowEffect();
 
         _currentlyGlowingBtn = targetBtn;
-
-        // 【核心修复 3】：不再使用 AINodeGlowEffect，而是开启专属的强力 UI 呼吸协程
         _glowCoroutine = StartCoroutine(ButtonBreathRoutine(targetBtn));
     }
 

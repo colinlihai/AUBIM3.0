@@ -23,6 +23,11 @@ public class AIChatManager : MonoBehaviour
     // UI 层的显示列表（仅用于 SaveSystem 存读档和 UI 重建）
     private List<ChatMessageData> _allMessages = new List<ChatMessageData>();
 
+    public bool IsChatInputFocused()
+    {
+        return chatInput != null && chatInput.isFocused;
+    }
+
     void Awake()
     {
         Instance = this;

@@ -215,7 +215,7 @@ public class NodeCardManager : MonoBehaviour
     // ==========================================
     // —”≥Ÿ≈≈∞Ê–≠≥Ã
     // ==========================================
-    private System.Collections.IEnumerator DelayedLayoutAndSelect(BaseNodeController parentNode, int childCount)
+    private IEnumerator DelayedLayoutAndSelect(BaseNodeController parentNode, int childCount)
     {
         yield return null;
         Canvas.ForceUpdateCanvases();

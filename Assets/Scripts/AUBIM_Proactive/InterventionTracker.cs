@@ -206,6 +206,12 @@ public class InterventionTracker : MonoBehaviour
                 return;
             }
 
+            if (AIChatManager.Instance != null && AIChatManager.Instance.IsChatInputFocused())
+            {
+                _idleTimer = 0f;
+                return;
+            }
+
             // 无论系统处于什么锁死状态，只要检测到用户在操作键鼠，立刻重置并解锁！
             if (hasAnyInput)
             {
@@ -279,11 +285,18 @@ public class InterventionTracker : MonoBehaviour
     // ==========================================
     private InterventionType GetBestPredictedType(out string contextStr, out bool isGlobal, out string exactMLKey)
     {
-        // 核心路由隔离：以 ArticleModal 的状态为绝对权威
-        bool isArticleActive = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+        // 1. 获取基础物理状态
+        bool isArticleModalOpen = ArticleGenerator.Instance != null && ArticleGenerator.Instance.articleModal.activeInHierarchy;
+        bool isArticleInputFocused = isArticleModalOpen && ArticleGenerator.Instance.mainBodyInput != null && ArticleGenerator.Instance.mainBodyInput.isFocused;
 
         int totalNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetAllNodes().Count : 0;
         int selectedNodes = NodeCardManager.Instance != null ? NodeCardManager.Instance.GetSelectedNodes().Count : 0;
+
+        // 【核心上下文抢占逻辑】：
+        // 什么时候系统才认为你真的在“成文区”？
+        // 答：成文区开着，并且（你在成文区里点出了光标 OR 你在画布上什么节点都没选中）
+        // 这意味着：即便成文区开着，只要你去左边选中了一个导图节点，系统立刻把 AI 上下文切回给导图区的 4 个按钮！
+        bool isArticleActive = isArticleModalOpen && (isArticleInputFocused || selectedNodes == 0);
 
         contextStr = isArticleActive ? "Article" : "Canvas";
         isGlobal = (!isArticleActive && selectedNodes == 0);
@@ -304,44 +317,74 @@ public class InterventionTracker : MonoBehaviour
             bool isFocused = input.isFocused;
             int cursorIndex = input.selectionFocusPosition;
 
-            // 判断用户是否有高亮选中文本
             int selStart = Mathf.Min(input.selectionAnchorPosition, input.selectionFocusPosition);
             int selEnd = Mathf.Max(input.selectionAnchorPosition, input.selectionFocusPosition);
             bool hasSelection = selEnd > selStart;
 
             if (string.IsNullOrWhiteSpace(text))
             {
-                // 1. 全文起草 (空白)
                 exactMLKey = "article_coldstart";
                 bestType = InterventionType.ArticleDraft;
             }
             else if (hasSelection)
             {
-                // 2. 局部润色 (有选中高亮文字)
-                exactMLKey = "article_refine";
-                bestType = InterventionType.ArticleRefine;
-            }
-            else if (!isFocused)
-            {
-                // 3. 全局审稿 (没选中字，且失去焦点没在打字)
-                exactMLKey = "article_reflect";
-                bestType = InterventionType.ArticleReview;
-            }
-            else if (text.Length - cursorIndex <= 15)
-            {
-                // 4. 顺势续写 (光标在末尾)
-                exactMLKey = "article_expand";
-                bestType = InterventionType.ArticleExpand;
+                // 【重大优化】：选中文本时的“发呆”应该极快触发！
+                // 如果当前发呆时间大于 5 秒 (不用等25秒)，就直接视为润色请求
+                if (_idleTimer >= 5f)
+                {
+                    exactMLKey = "article_refine";
+                    bestType = InterventionType.ArticleRefine;
+                    // 我们用一个捷径直接返回概率 1.0，强行让它亮起
+                    return bestType;
+                }
+                else
+                {
+                    // 时间还没到 5 秒，继续憋着
+                    return InterventionType.None;
+                }
             }
             else
             {
-                // 5. 内容衔接 (光标在中间)
-                exactMLKey = "article_stitch";
-                bestType = InterventionType.ArticleStitch;
-            }
+                // 没有选中文本时，根据光标位置和字数，让 ML 分类器来打擂台！
+                bool isAtEnd = (text.Length - cursorIndex <= 15);
+                bool isLongArticle = text.Length > 500;
 
-            // 获取预测概率 (成文区只取命中条件的唯一目标)
-            maxProb = InterventionClassifier.Instance.PredictAcceptanceProbability(exactMLKey, contextStr, totalNodes, selectedNodes, CurrentArticleAction, "");
+                List<string> candidates = new List<string>();
+                List<InterventionType> types = new List<InterventionType>();
+
+                // 候选池加入
+                if (isAtEnd)
+                {
+                    candidates.Add("article_expand");
+                    types.Add(InterventionType.ArticleExpand);
+                }
+                else
+                {
+                    candidates.Add("article_stitch");
+                    types.Add(InterventionType.ArticleStitch);
+                }
+
+                // 【重大优化】：只要字数足够长，无论是焦点在不在，审稿意见都加入候选池参与竞争！
+                if (isLongArticle)
+                {
+                    candidates.Add("article_reflect");
+                    types.Add(InterventionType.ArticleReview);
+                }
+
+                // 让大脑算一算，当前情况下弹哪个最有可能被接受
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    float prob = InterventionClassifier.Instance.PredictAcceptanceProbability(
+                        candidates[i], contextStr, totalNodes, selectedNodes, CurrentArticleAction, "");
+
+                    if (prob > maxProb)
+                    {
+                        maxProb = prob;
+                        exactMLKey = candidates[i];
+                        bestType = types[i];
+                    }
+                }
+            }
         }
         // =========================================================
         // 路由 B：画布区 4 大按钮触发逻辑
@@ -461,6 +504,8 @@ public class InterventionTracker : MonoBehaviour
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
+        _isAwaitingUserAction = true;
+
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
         key = NormalizeMLKey(key);
 
@@ -476,6 +521,8 @@ public class InterventionTracker : MonoBehaviour
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
+        _isAwaitingUserAction = true;
+
         string key = string.IsNullOrEmpty(forcedKey) ? _lastPredictedRecordKey : forcedKey;
         key = NormalizeMLKey(key);
 
@@ -491,6 +538,7 @@ public class InterventionTracker : MonoBehaviour
     {
         _isBreathingActive = false;
         _idleTimer = 0f;
+        _isAwaitingUserAction = true;
 
         // 【核心修复 1】：终于开始采用传进来的 clickedTypeString 了！
         string key = string.IsNullOrEmpty(clickedTypeString) ? _lastPredictedRecordKey : clickedTypeString;

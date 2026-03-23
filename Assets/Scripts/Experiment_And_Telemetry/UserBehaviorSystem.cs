@@ -95,6 +95,8 @@ public class TelemetryLog
                                  // - Edit: 字数变化量 (Delta)
                                  // - Pan: 移动距离
                                  // - Stall: 停滞持续秒数
+
+    public string ProjectName;
 }
 
 public class UserBehaviorSystem : MonoBehaviour
@@ -107,6 +109,8 @@ public class UserBehaviorSystem : MonoBehaviour
 
     private string _currentSaveName = "";
     private float _startTime;
+
+    private string _sessionID;
 
     // 日志保存的根目录
     private string LogFolderPath
@@ -145,6 +149,7 @@ public class UserBehaviorSystem : MonoBehaviour
         if (!Directory.Exists(LogFolderPath)) Directory.CreateDirectory(LogFolderPath);
 
         _startTime = Time.time;
+        _sessionID = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         // 系统正式开启的第一条记录
         LogEvent(BehaviorEventType.SessionStart, "System", $"UserLogin:{subjectID}");
     }
@@ -160,20 +165,17 @@ public class UserBehaviorSystem : MonoBehaviour
     }
 
     // =========================================================
-    // 切换日志上下文：不再需要读取旧日志到内存！
+    // 切换上下文：只打点，不换文件！
     // =========================================================
     public void SwitchLogContext(string saveName)
     {
-        if (!string.IsNullOrEmpty(_currentSaveName))
+        if (!string.IsNullOrEmpty(_currentSaveName) && _currentSaveName != "Unsaved")
         {
             LogEvent(BehaviorEventType.SessionEnd, "System", $"Leave_Project:{_currentSaveName}");
         }
 
-        _currentSaveName = saveName;
-
-        // 我们改为追加模式 (JSONL)，如果文件已存在，直接往后写即可
-        // 不再需要把旧文件 Load 到内存里，极大节省内存和算力！
-        LogEvent(BehaviorEventType.SessionStart, "System", $"Resume_Project:{saveName}");
+        _currentSaveName = string.IsNullOrEmpty(saveName) ? "Unsaved" : saveName;
+        LogEvent(BehaviorEventType.SessionStart, "System", $"Resume_Project:{_currentSaveName}");
     }
 
     public void RenameLogContext(string newSaveName)
@@ -184,18 +186,12 @@ public class UserBehaviorSystem : MonoBehaviour
             return;
         }
 
-        LogEvent(BehaviorEventType.SessionEnd, "System", $"SaveAs_Snapshot:{newSaveName}");
+        LogEvent(BehaviorEventType.SessionEnd, "System", $"Rename_Project: From {_currentSaveName} to {newSaveName}");
         _currentSaveName = newSaveName;
-        LogEvent(BehaviorEventType.SessionStart, "System", $"Resume_Project:{newSaveName}");
-    }
-
-    private string GetLogFileName(string saveName)
-    {
-        return $"AUBIM_Log_{saveName}.json";
     }
 
     // =========================================================
-    // 核心优化：增量异步打点 (Fire and Forget)
+    // 核心优化：增量异步打点 (固定写入 Session 文件)
     // =========================================================
     public void LogEvent(BehaviorEventType type, string targetID = "System", string info = "", float value = 0)
     {
@@ -208,23 +204,20 @@ public class UserBehaviorSystem : MonoBehaviour
             EventType = type.ToString(),
             TargetID = targetID,
             ContextInfo = info,
-            Value = value
+            Value = value,
+            ProjectName = _currentSaveName // 【新增】：写入当时的项目名
         };
 
-        // 广播事件
         OnEventLogged?.Invoke(newLog);
 
-        // 1. 将单条记录序列化
         string jsonLine = JsonUtility.ToJson(newLog);
 
-        // 2. 获取当前应该写入的文件路径
         string currentUserID = ExperimentManager.Instance != null ? ExperimentManager.Instance.currentSubjectID : "DefaultUser";
-        string filename = string.IsNullOrEmpty(_currentSaveName)
-            ? $"AUBIM_Unsaved_{currentUserID}_{DateTime.Now:MMdd}.jsonl"
-            : GetLogFileName(_currentSaveName);
+
+        // 【核心修复】：文件名永远使用 _sessionID 锚定，绝不中途断裂！
+        string filename = $"AUBIM_Log_{currentUserID}_{_sessionID}.jsonl";
         string path = Path.Combine(LogFolderPath, filename);
 
-        // 3. 异步追加到文件末尾 (加上换行符)，不阻塞主线程
         AppendLogAsync(path, jsonLine + "\n");
     }
 
